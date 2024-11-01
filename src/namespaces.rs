@@ -54,8 +54,12 @@ pub fn enter_namespaces_as_root(lead_pid: i32) -> Result<()> {
         }
         Ok(ns) => ns,
     };
+    log::debug!("lead_ns = {:?}", lead_ns);
 
     let me = Process::myself()?;
+    let me_id = me.pid;
+    log::debug!("my pid = {}", me_id);
+
     let my_ns = match namespace_set(&me) {
         Err(err) => {
             log::error!("cannot inspect own namespaces: {err}");

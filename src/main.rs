@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
-    fs::create_dir_all,
-    path::{Path, PathBuf},
+    fmt::Debug,
+    fs::{create_dir_all, read_link},
+    io,
+    os::unix::process::CommandExt,
+    path::Path,
     process::{exit, Command},
 };
 
@@ -9,14 +12,17 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use namespaces::enter_namespaces_as_root;
 use overlay::OverlayMount;
+use pid_lookup::pid_lookup;
 use procfs::process::Process;
 use rustix::{
     path::Arg,
-    thread::{capabilities, unshare, CapabilityFlags, UnshareFlags},
+    process::geteuid,
+    thread::{unshare, UnshareFlags},
 };
 
 mod namespaces;
 mod overlay;
+mod pid_lookup;
 
 /// Container debug CLI
 #[derive(Parser, Debug)]
@@ -24,11 +30,26 @@ mod overlay;
 struct Args {
     /// Base image path
     #[arg(short, long, env)]
-    img_path: Option<PathBuf>,
+    img_path: Option<String>,
 
-    /// Lead PID
-    #[arg(value_parser = clap::value_parser!(i32).range(1..))]
-    lead_pid: i32,
+    /// Container ID
+    container_id: String,
+}
+
+impl Args {
+    fn args(&self, lead_pid: Option<i32>) -> Vec<String> {
+        let mut args = vec![];
+        if self.img_path.is_some() {
+            args.push("--img-path".to_string());
+            args.push(self.img_path.clone().unwrap().to_string_lossy().into());
+        }
+        if let Some(lead_pid) = lead_pid {
+            args.push(lead_pid.to_string())
+        } else {
+            args.push(self.container_id.clone())
+        }
+        args
+    }
 }
 
 const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
@@ -55,25 +76,53 @@ fn get_proc_env(pid: i32) -> Result<HashMap<String, String>> {
         .collect())
 }
 
+fn reexec_with_sudo(args: &Args, lead_pid: i32) -> Result<(), io::Error> {
+    let self_exe = read_link("/proc/self/exe")?;
+    let loglevel = std::env::var("LOGLEVEL").unwrap_or_default();
+    let mut cmd_args = vec![
+        String::from("_RUNNING_WITH_SUDO=1"),
+        format!("LOGLEVEL={}", loglevel),
+        String::from(self_exe.to_str().unwrap()),
+    ];
+    cmd_args.extend(args.args(Some(lead_pid)));
+    Err(Command::new("sudo").args(cmd_args).exec())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     init_logging();
 
-    let overlay = match args.img_path {
+    let lead_pid = if let Ok(pid) = args.container_id.parse::<i32>() {
+        pid
+    } else if let Some(pid) = pid_lookup(&args.container_id) {
+        pid
+    } else {
+        log::error!("could not find container PID");
+        exit(exitcode::NOINPUT);
+    };
+    log::debug!("lead PID: {}", lead_pid);
+
+    let overlay = match args.img_path.clone() {
         Some(img_path) => {
+            let img_path = Path::new(&img_path);
             if !img_path.exists() || !img_path.is_dir() {
                 log::error!("image path does not exist or is not a directory");
                 exit(exitcode::NOINPUT);
             }
             log::debug!("image path seems valid");
-            let caps =
-                capabilities(None).expect("could not fetch own capabilities");
-            if !caps.effective.contains(CapabilityFlags::SYS_ADMIN) {
-                log::error!("CAP_SYS_ADMIN required: either use 'sudo' or add the capability to the executable");
-                exit(exitcode::OSERR);
+
+            let upper_dir = Path::new("ofs/upper");
+            create_dir_all(upper_dir)?;
+
+            let work_dir = Path::new("ofs/work");
+            create_dir_all(work_dir)?;
+
+            if !geteuid().is_root() {
+                log::debug!("re-executing with sudo...");
+                reexec_with_sudo(&args, lead_pid)?
             }
-            log::debug!("yeah, we have SYS_ADMIN");
-            match OverlayMount::new(img_path, "./ofs") {
+
+            match OverlayMount::new(img_path, upper_dir, work_dir) {
                 Err(err) => {
                     log::error!("could not create base image mount: {:?}", err);
                     exit(exitcode::OSERR);
@@ -87,7 +136,7 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    let mut proc_env = match get_proc_env(args.lead_pid) {
+    let mut proc_env = match get_proc_env(lead_pid) {
         Err(err) => {
             // TODO: check the different error types
             log::error!("could not fetch the process environment: {err}");
@@ -103,7 +152,7 @@ fn main() -> Result<()> {
         .unwrap_or(&default_path)
         .clone();
 
-    enter_namespaces_as_root(args.lead_pid)?;
+    enter_namespaces_as_root(lead_pid)?;
 
     if let Some(overlay) = overlay {
         log::debug!("mounting overlay...");
@@ -113,6 +162,11 @@ fn main() -> Result<()> {
         let nix = Path::new("/nix");
         create_dir_all(nix)?;
         overlay.mount(nix)?;
+
+        // let cache_dir = nix.join(".cache");
+        // if !cache_dir.exists() {
+        //     create_dir_all(cache_dir)?;
+        // }
 
         // update PATH
         proc_path =
@@ -125,30 +179,38 @@ fn main() -> Result<()> {
                     "XDG_DATA_DIR",
                     format!("/usr/local/share:/usr/share:{nix_base}/share"),
                 ),
+                ("XDG_CACHE_HOME", String::from("/nix/.cache")),
                 ("TERMINFO_DIRS", format!("{nix_base}/share/terminfo")),
                 ("LIBEXEC_PATH", format!("{nix_base}/libexec")),
                 ("INFOPATH", format!("{nix_base}/share/info")),
+                ("NIX_CONF_DIR", String::from("/nix/etc")),
             ]
             .map(|(k, v)| (k.into(), v)),
         )
     }
 
     let term = std::env::var("TERM").unwrap_or_default();
+    match std::env::var("_RUNNING_WITH_SUDO") {
+        Ok(val) => {
+            log::debug!("_RUNNING_WITH_SUDO={val}");
+        }
+        Err(err) => {
+            log::debug!("error: {:?}", err);
+        }
+    }
 
     proc_env.extend(
         [("PATH", proc_path), ("TERM", term)].map(|(k, v)| (k.into(), v)),
     );
+
+    // TODO: path HOME w/ user as defined by /etc/passwd
 
     // TODO: find shell in this order:
     // - zsh
     // - bash
     // - sh at last
 
-    Command::new("sh")
-        .env_clear()
-        .envs(proc_env)
-        .spawn()?
-        .wait()?;
+    Command::new("zsh").env_clear().envs(proc_env).status()?;
 
     Ok(())
 }
