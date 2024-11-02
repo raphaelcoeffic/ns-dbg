@@ -133,7 +133,7 @@ fn find_nix(store_dir: &Path, version: &str) -> Result<PathBuf> {
         let path = dir?.path();
         let dir = path.file_name().unwrap();
         if nix_re.is_match(dir.to_str().unwrap()) {
-            return Ok(path);
+            return Ok(PathBuf::from(dir));
         }
     }
 
@@ -161,7 +161,8 @@ where
 
     let nix_bin = dest.join(".bin");
     if !nix_bin.exists() {
-        let nix_path = Path::new("/").join(find_nix(&nix_store, NIX_VERSION)?);
+        let nix_store_path = find_nix(&nix_store, NIX_VERSION)?;
+        let nix_path = Path::new("/nix/store").join(nix_store_path);
         symlink(nix_path.join("bin"), nix_bin)?;
     }
 
@@ -179,7 +180,12 @@ fn build_base_flake<P>(flake_dir: P) -> Result<PathBuf>
 where
     P: AsRef<Path>,
 {
-    let env = [("PATH", "/nix/.bin"), ("NIX_CONF_DIR", "/nix/etc")];
+    let env = [
+        ("PATH", "/nix/.bin"),
+        ("NIX_CONF_DIR", "/nix/etc"),
+        ("XDG_CACHE_HOME", "/nix/.cache"),
+        ("XDG_CONFIG_HOME", "/nix/.config"),
+    ];
 
     let flake_dir = flake_dir.as_ref().canonicalize().unwrap();
     let build_output = Command::new("nix")

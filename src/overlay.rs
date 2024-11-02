@@ -1,3 +1,4 @@
+use std::fs::create_dir_all;
 use std::path::Path;
 use std::{os::fd::OwnedFd, path::PathBuf};
 
@@ -33,13 +34,19 @@ impl OverlayMount {
         Ok(OverlayMount(fd_mnt))
     }
 
-    pub fn mount(self, dest: impl AsRef<Path>) -> Result<()> {
-        Ok(move_mount(
+    pub fn mount<P>(self, dest: P) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        let dest = dest.as_ref();
+        create_dir_all(dest)?;
+        move_mount(
             self.0.as_fd(),
             "",
             fs::CWD,
-            dest.as_ref(),
+            dest,
             MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-        )?)
+        )?;
+        Ok(())
     }
 }
