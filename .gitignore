@@ -1,3 +1,5 @@
 /target
 /base
 /ofs
+nix
+image_builder/base.tar.xz
