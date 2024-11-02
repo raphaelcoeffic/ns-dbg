@@ -6,6 +6,14 @@ powerful. No need to modify your containers or add debugging tools at build
 time.
 
 ## Features
+
+### Runtime Support
+- 🐳 Docker
+- 🦭 Podman
+- 🐋 Nerdctl
+- 🔧 systemd-nspawn
+
+### Core Features
 - Inject a complete shell environment into running containers
 - Works with any container, including minimal and distroless images
 - Zero container modifications required
