@@ -24,7 +24,7 @@ mod namespaces;
 mod overlay;
 mod pid_lookup;
 
-const APP_NAME: &str = "ns-dbg";
+const APP_NAME: &str = "dive";
 const IMG_DIR: &str = "base-img";
 const OVL_DIR: &str = "overlay";
 

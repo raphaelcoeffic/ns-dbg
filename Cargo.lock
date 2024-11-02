@@ -272,6 +272,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "env_logger",
+ "exitcode",
+ "image_builder",
+ "log",
+ "procfs",
+ "rustix",
+ "serde",
+ "serde_json",
+ "which",
+]
+
+[[package]]
 name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,24 +770,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "ns-dbg"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "env_logger",
- "exitcode",
- "image_builder",
- "log",
- "procfs",
- "rustix",
- "serde",
- "serde_json",
- "which",
 ]
 
 [[package]]
