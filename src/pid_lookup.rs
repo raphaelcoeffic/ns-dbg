@@ -25,7 +25,7 @@ where
     let output = cmd.output();
     match output {
         Err(_) => {
-            println!("command '{:?}' failed", cmd);
+            log::error!("command '{:?}' failed", cmd);
         }
         Ok(output) => {
             if output.status.success() {

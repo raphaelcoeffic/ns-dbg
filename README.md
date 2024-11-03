@@ -32,6 +32,12 @@ cargo build --release
 
 # Optional: Install system-wide
 cargo install --path .
+
+# Optional: Build static binary
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+export CC=aarch64-linux-gnu-gcc
+rustup target add aarch64-unknown-linux-musl
+cargo build --target=aarch64-unknown-linux-musl
 ```
 
 ## Usage

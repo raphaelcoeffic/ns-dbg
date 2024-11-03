@@ -1,31 +1,231 @@
-use std::env::consts::ARCH;
-use std::env::set_current_dir;
-use std::os::unix::fs::{symlink, PermissionsExt};
-use std::process::{exit, Command, Stdio};
 use std::{
+    collections::HashSet,
+    env::{consts::ARCH, set_current_dir},
     fs, io,
+    os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
+    process::{exit, Command, Stdio},
 };
 
 use anyhow::{bail, Context, Result};
+use include_dir::{include_dir, Dir};
 use indicatif::{ProgressBar, ProgressStyle};
 use liblzma::read::XzDecoder;
 use regex::Regex;
-use rustix::fs::{bind_mount, recursive_bind_mount};
-use rustix::path::Arg;
-use rustix::process::{chroot, getgid, getuid, waitpid, WaitOptions};
-use rustix::runtime::{fork, Fork};
-use rustix::thread::{unshare, UnshareFlags};
+use rustix::{
+    fs::{bind_mount, recursive_bind_mount},
+    path::Arg,
+    process::{chroot, getgid, getuid, waitpid, WaitOptions},
+    runtime::{fork, Fork},
+    thread::{unshare, Pid, UnshareFlags},
+};
 use tar::Archive;
 use tempfile::tempdir;
 
 const NIX_VERSION: &str = "2.24.9";
 
 const NIX_CONF: &str = "experimental-features = nix-command flakes
-auto-optimise-store = true
 sandbox = false
 build-users-group =
 ";
+
+static FLAKE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/debug-shell");
+
+// Break compilation if 'flake.nix' does not exist
+static _FLAKE_NIX_GUARD_: &str = include_str!("debug-shell/flake.nix");
+
+type PostProcessFn = Box<dyn Fn(&Path) -> Result<()>>;
+
+pub struct BaseImageBuilder {
+    nix_dir: PathBuf,
+    flake_dir: Option<PathBuf>,
+    post_process: Option<PostProcessFn>,
+    package_output: Option<PathBuf>,
+    compress: bool,
+}
+
+impl BaseImageBuilder {
+    const SUCCESS: i32 = 0;
+    const BUILD_FAILED: i32 = 1;
+    const POST_PROCESS_FAILED: i32 = 2;
+
+    pub fn new<P>(nix_dir: P) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        BaseImageBuilder {
+            nix_dir: nix_dir.as_ref().to_owned(),
+            flake_dir: None,
+            post_process: None,
+            package_output: None,
+            compress: false,
+        }
+    }
+
+    pub fn flake_dir<P>(&mut self, flake_dir: P) -> &mut Self
+    where
+        P: AsRef<Path>,
+    {
+        self.flake_dir.replace(flake_dir.as_ref().to_owned());
+        self
+    }
+
+    pub fn post_process(
+        &mut self,
+        func: impl Fn(&Path) -> Result<()> + 'static,
+    ) -> &mut Self {
+        self.post_process.replace(Box::new(func));
+        self
+    }
+
+    pub fn package<P>(&mut self, output: P, compress: bool) -> &mut Self
+    where
+        P: AsRef<Path>,
+    {
+        let output = output.as_ref();
+        let archive_suffix = if compress { "tar.xz" } else { "tar" };
+        let archive_name = format!("{}.{}", output.display(), archive_suffix);
+
+        self.package_output.replace(PathBuf::from(archive_name));
+        self.compress = compress;
+        self
+    }
+
+    pub fn build_base(&self) -> Result<()> {
+        install_nix(&self.nix_dir)?;
+        log::info!("building base image");
+
+        let tmp = tempdir()?;
+        match unsafe { fork()? } {
+            Fork::Child(_) => exit(self.build_base_child(tmp.path())),
+            Fork::Parent(child_pid) => self.build_base_parent(child_pid),
+        }
+    }
+
+    fn build_base_child(&self, tmp: &Path) -> i32 {
+        let build_status = self.build_base_in_chroot(tmp);
+
+        if build_status.is_err() {
+            return Self::BUILD_FAILED;
+        }
+
+        let base_path = build_status.unwrap();
+        if let Err(err) = self.do_post_process(&base_path) {
+            log::error!("post process failed: {}", err);
+            return Self::POST_PROCESS_FAILED;
+        }
+
+        if self.do_package(&base_path).is_err() {
+            return Self::POST_PROCESS_FAILED;
+        }
+
+        Self::SUCCESS
+    }
+
+    fn build_base_parent(&self, child_pid: Pid) -> Result<()> {
+        if let Some(status) = waitpid(Some(child_pid), WaitOptions::empty())? {
+            if status.exit_status().is_some_and(|code| code != 0) {
+                bail!("child process failed");
+            }
+        } else {
+            bail!("child process was signaled or otherwise stopped");
+        }
+
+        Ok(())
+    }
+
+    fn build_base_in_chroot(&self, tmp: &Path) -> Result<PathBuf> {
+        user_mount_ns()?;
+        bind_mount_all_dir(&self.nix_dir, tmp)?;
+
+        let current_dir = std::env::current_dir()?;
+        chroot(tmp)?;
+        set_current_dir(current_dir)?;
+
+        match &self.flake_dir {
+            None => {
+                let flake_tmp = tempdir()?;
+                let flake_dir = flake_tmp.path();
+
+                let flake_nix = FLAKE_DIR.get_file("flake.nix");
+                if let Some(flake_nix) = flake_nix {
+                    fs::write(
+                        flake_dir.join("flake.nix"),
+                        flake_nix.contents(),
+                    )?;
+                }
+
+                let flake_lock = FLAKE_DIR.get_file("flake.lock");
+                if let Some(flake_lock) = flake_lock {
+                    fs::write(
+                        flake_dir.join("flake.lock"),
+                        flake_lock.contents(),
+                    )?;
+                }
+
+                build_base_flake(flake_dir)
+            }
+            Some(flake_dir) => build_base_flake(flake_dir),
+        }
+    }
+
+    fn do_post_process(&self, base_path: &Path) -> Result<()> {
+        if let Some(func) = &self.post_process {
+            func(base_path)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn do_package(&self, base_path: &Path) -> Result<()> {
+        if self.package_output.is_none() {
+            return Ok(());
+        }
+
+        let output = self.package_output.as_ref().unwrap();
+        if self.compress {
+            log::info!(
+                "packaging and compressing base image to {}",
+                output.display(),
+            );
+        } else {
+            log::info!("packaging base image to {}", output.display());
+        }
+
+        let base_set = read_nix_closure(base_path)?;
+        let nix_set = read_nix_paths("/nix")?;
+
+        let mut tar_cmd = Command::new("tar");
+        tar_cmd.args([
+            "--directory=/nix",
+            "--exclude=var/nix/*",
+            "-c",
+            "-f",
+            &format!("{}", output.display()),
+        ]);
+
+        if self.compress {
+            tar_cmd.args(["-I", "xz -T0"]);
+        }
+
+        tar_cmd
+            .args([".bin", ".base", "etc", "var/nix"])
+            .args(nix_set.union(&base_set).map(|p| "store/".to_owned() + p))
+            .env("PATH", "/nix/.base/bin");
+
+        let tar_status = tar_cmd.status()?;
+
+        if !tar_status.success() {
+            if let Some(exit_code) = tar_status.code() {
+                bail!("tar failed with {}", exit_code);
+            } else {
+                bail!("tar was interrupted by signal");
+            }
+        }
+
+        Ok(())
+    }
+}
 
 fn nix_installer_url(version: &str) -> String {
     const NIX_BASE_URL: &str = "https://releases.nixos.org/nix";
@@ -43,7 +243,66 @@ fn write_nix_paths(nix_dir: &Path) -> Result<(), io::Error> {
     fs::write(nix_dir.join(".cache/nix_paths"), nix_paths)
 }
 
-fn progress_bar(len: u64) -> ProgressBar {
+fn read_nix_paths<P>(nix_dir: P) -> Result<HashSet<String>, io::Error>
+where
+    P: AsRef<Path>,
+{
+    Ok(fs::read(nix_dir.as_ref().join(".cache/nix_paths"))?
+        .to_string_lossy()
+        .lines()
+        .map(|l| l.to_owned())
+        .collect())
+}
+
+fn read_nix_closure<P>(path: P) -> Result<HashSet<String>>
+where
+    P: AsRef<Path>,
+{
+    let path = path.as_ref();
+    let output = Command::new("nix-store")
+        .args(["-qR", path.as_str()?])
+        .env("PATH", "/nix/.bin")
+        .env("NIX_CONF_DIR", "/nix/etc")
+        .output()?;
+
+    Ok(output
+        .stdout
+        .to_string_lossy()
+        .lines()
+        .map(|p| p.rsplit('/').next().unwrap().to_owned())
+        .collect())
+}
+
+fn chmod_apply(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
+    let metadata = fs::metadata(path)?;
+    let mode = metadata.permissions().mode();
+    fs::set_permissions(path, fs::Permissions::from_mode(func(mode)))
+}
+
+// fix permissions recursively
+pub fn chmod(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        return Ok(());
+    }
+
+    if file_type.is_file() {
+        return chmod_apply(path, func);
+    }
+
+    if file_type.is_dir() {
+        for entry in path.read_dir()? {
+            chmod(&entry?.path(), func)?;
+        }
+        chmod_apply(path, func)?;
+    }
+
+    Ok(())
+}
+
+pub fn progress_bar(len: u64) -> ProgressBar {
     ProgressBar::new(len).with_style(
         ProgressStyle::with_template(
             "[{percent:>2}%] {bar:40.cyan/blue} \
@@ -61,7 +320,7 @@ fn download_and_install_nix(
     url: &str,
     dest: &Path,
 ) -> Result<()> {
-    println!("downloading {url} into {}", dest.display());
+    log::info!("downloading {url} into {}", dest.display());
     let response = reqwest::blocking::get(url)?;
     let bar = progress_bar(response.content_length().unwrap_or_default());
     let decoder = XzDecoder::new(bar.wrap_read(response));
@@ -84,42 +343,12 @@ fn download_and_install_nix(
         }
     }
 
-    // fix permissions
-    fn chmod(path: &Path) -> Result<(), io::Error> {
-        fn chmod_readonly(path: &Path) -> Result<(), io::Error> {
-            let metadata = fs::metadata(path)?;
-            let mode = metadata.permissions().mode();
-            fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o555))
-        }
-
-        let metadata = fs::symlink_metadata(path)?;
-        let file_type = metadata.file_type();
-
-        if file_type.is_symlink() {
-            return Ok(());
-        }
-
-        if file_type.is_file() {
-            return chmod_readonly(path);
-        }
-
-        if file_type.is_dir() {
-            for entry in path.read_dir()? {
-                chmod(&entry?.path())?;
-            }
-            chmod_readonly(path)?;
-        }
-
-        Ok(())
-    }
-
     for dir in store_dir.read_dir()? {
         let path = dir?.path();
-        chmod(&path)?;
+        chmod(&path, |mode| mode & 0o555)?;
     }
 
     write_nix_paths(dest)?;
-    println!("done");
 
     Ok(())
 }
@@ -141,7 +370,7 @@ fn find_nix(store_dir: &Path, version: &str) -> Result<PathBuf> {
 }
 
 /// Install Nix into `dest`
-pub fn install_nix<P>(dest: P) -> Result<()>
+fn install_nix<P>(dest: P) -> Result<()>
 where
     P: AsRef<Path>,
 {
@@ -155,6 +384,7 @@ where
 
     let nix_store = dest.join("store");
     if !nix_store.exists() {
+        log::info!("installing Nix in {}", dest.display());
         let nix_url = nix_installer_url(NIX_VERSION);
         download_and_install_nix(NIX_VERSION, &nix_url, dest)?;
     }
@@ -262,69 +492,4 @@ fn bind_mount_all_dir(base_path: &Path, tmp: &Path) -> Result<()> {
     bind_mount(base_path, tmp_nix)?;
 
     Ok(())
-}
-
-pub fn build_base_in_chroot(nix_dir: &Path, tmp: &Path) -> Result<PathBuf> {
-    user_mount_ns()?;
-    bind_mount_all_dir(nix_dir, tmp)?;
-
-    chroot(tmp)?;
-    set_current_dir("/")?;
-
-    let flake_dir = tempdir()?;
-    fs::write(
-        flake_dir.path().join("flake.nix"),
-        include_str!("debug-shell/flake.nix"),
-    )?;
-
-    build_base_flake(flake_dir.path())
-}
-
-const SUCCESS: i32 = 0;
-const BUILD_FAILED: i32 = 1;
-const POST_PROCESS_FAILED: i32 = 2;
-
-pub fn build_base_and_then<P, F>(nix_dir: P, func: F) -> Result<()>
-where
-    P: AsRef<Path>,
-    F: FnOnce(PathBuf) -> Result<()>,
-{
-    let tmp = tempdir()?;
-    println!("building base image in {}", tmp.path().display());
-
-    match unsafe { fork()? } {
-        Fork::Child(_) => {
-            let mut exit_code = BUILD_FAILED;
-            let build_status =
-                build_base_in_chroot(nix_dir.as_ref(), tmp.path());
-
-            if let Ok(base_path) = build_status {
-                exit_code = match func(base_path) {
-                    Err(_) => POST_PROCESS_FAILED,
-                    Ok(_) => SUCCESS,
-                };
-            }
-            exit(exit_code);
-        }
-        Fork::Parent(child_pid) => {
-            if let Some(status) =
-                waitpid(Some(child_pid), WaitOptions::empty())?
-            {
-                if status.exit_status().is_some_and(|code| code != 0) {
-                    bail!("child process failed");
-                }
-            } else {
-                bail!("child process was signaled or otherwise stopped");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub fn build_base<P>(nix_dir: P) -> Result<()>
-where
-    P: AsRef<Path>,
-{
-    build_base_and_then(nix_dir, |_| Ok(()))
 }

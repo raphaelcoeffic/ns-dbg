@@ -24,6 +24,12 @@ mod namespaces;
 mod overlay;
 mod pid_lookup;
 
+#[cfg(feature = "embedded_image")]
+mod embedded_image;
+
+#[cfg(not(feature = "embedded_image"))]
+use image_builder::BaseImageBuilder;
+
 const APP_NAME: &str = "dive";
 const IMG_DIR: &str = "base-img";
 const OVL_DIR: &str = "overlay";
@@ -121,9 +127,13 @@ fn main() -> Result<()> {
 
     let img_dir = get_img_dir(&args);
     if !img_dir.exists() || !img_dir.join("store").exists() {
-        image_builder::install_nix(&img_dir)
-            .context("could not install Nix")?;
-        image_builder::build_base(&img_dir)
+        #[cfg(feature = "embedded_image")]
+        embedded_image::install_base_image(&img_dir)
+            .context("could not unpack base image")?;
+
+        #[cfg(not(feature = "embedded_image"))]
+        BaseImageBuilder::new(&img_dir)
+            .build_base()
             .context("could not build base image")?;
     }
 
