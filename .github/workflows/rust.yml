@@ -3,7 +3,7 @@ name: Build
 on:
   push:
     branches: [ "main" ]
-    tags: ["v*"]
+    tags: ["v*.*.*"]
   pull_request:
     branches: [ "main" ]
 
@@ -45,16 +45,21 @@ jobs:
         args: "--locked --release --features embedded_image"
         strip: true
 
+    - name: Rename binary
+      env:
+        TARGET: ${{ matrix.platform.target }}
+      run: |
+        mv "target/$TARGET/release/dive" "dive-$TARGET"
+
     - name: Upload artifacts - binary
       uses: actions/upload-artifact@v4
       with:
         name: binary-${{ matrix.platform.target }}
-        path: |
-          target/${{ matrix.platform.target }}/release/dive
+        path: dive-*
 
-    - name: Publish artifacts and release
-      uses: houseabsolute/actions-rust-release@v0
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
       with:
-        executable-name: dive
-        target: ${{ matrix.platform.target }}
-        changes-file:
+        draft: true
+        files: dive-*
