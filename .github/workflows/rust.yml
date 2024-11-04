@@ -1,0 +1,60 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: ["v*"]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build - ${{ matrix.platform.os-name }}
+    strategy:
+      matrix:
+        platform:
+          - os-name: Linux-x86_64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+
+    runs-on: ${{ matrix.platform.runs-on }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build base image
+      run: |
+        cargo run --bin build-img
+        cargo clean
+
+    - name: Upload artifacts - base image
+      uses: actions/upload-artifact@v4
+      with:
+        name: base-${{ matrix.platform.target }}
+        path: |
+          base.tar.xz
+
+    - name: Build binary
+      uses: houseabsolute/actions-rust-cross@v0
+      with:
+        command: ${{ matrix.platform.command }}
+        target: ${{ matrix.platform.target }}
+        args: "--locked --release --features embedded_image"
+        strip: true
+
+    - name: Upload artifacts - binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: binary-${{ matrix.platform.target }}
+        path: |
+          target/${{ matrix.platform.target }}/release/dive
+
+    - name: Publish artifacts and release
+      uses: houseabsolute/actions-rust-release@v0
+      with:
+        executable-name: dive
+        target: ${{ matrix.platform.target }}
+        changes-file:
