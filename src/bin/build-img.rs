@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 
 use image_builder::*;
@@ -19,6 +19,10 @@ struct Args {
     /// Persistent base directory
     #[arg(short, long, env)]
     flake_dir: Option<PathBuf>,
+
+    /// Architecture
+    #[arg(short, long, env)]
+    arch: Option<String>,
 
     /// Compress base image
     #[arg(short, long, env)]
@@ -71,6 +75,14 @@ impl Drop for BaseDir {
     }
 }
 
+fn is_native_arch(arch: &str) -> bool {
+    arch == std::env::consts::ARCH
+}
+
+fn is_qemu_supported_arch(arch: &str) -> bool {
+    fs::exists(format!("/proc/sys/fs/binfmt_misc/qemu-{arch}")).is_ok_and(|x| x)
+}
+
 fn init_logging() {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
@@ -92,5 +104,15 @@ fn main() -> Result<()> {
         base_builder.flake_dir(flake_dir);
     }
 
-    base_builder.build_base()
+    if let Some(arch) = args.arch {
+        if !is_native_arch(&arch) && !is_qemu_supported_arch(&arch) {
+            bail!(
+                "{arch} does not seem to be supported. \
+                 Try installing 'qemu-user-static' to enable support."
+            )
+        }
+        base_builder.build_base_with_arch(&arch)
+    } else {
+        base_builder.build_base()
+    }
 }

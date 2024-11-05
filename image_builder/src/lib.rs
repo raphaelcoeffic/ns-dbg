@@ -92,7 +92,11 @@ impl BaseImageBuilder {
     }
 
     pub fn build_base(&self) -> Result<()> {
-        install_nix(&self.nix_dir)?;
+        self.build_base_with_arch(ARCH)
+    }
+
+    pub fn build_base_with_arch(&self, arch: &str) -> Result<()> {
+        install_nix(arch, &self.nix_dir)?;
         log::info!("building base image");
 
         let tmp = tempdir()?;
@@ -208,10 +212,17 @@ impl BaseImageBuilder {
             tar_cmd.args(["-I", "xz -T0"]);
         }
 
+        // prefer native tar over emulated one
+        let current_path = std::env::var_os("PATH")
+            .filter(|path| !path.is_empty())
+            .map(|path| path.to_string_lossy().into_owned() + ":")
+            .unwrap_or_default();
+        let path_env = format!("{current_path}/nix/.base/bin");
+
         tar_cmd
             .args([".bin", ".base", "etc", "var/nix"])
             .args(nix_set.union(&base_set).map(|p| "store/".to_owned() + p))
-            .env("PATH", "/nix/.base/bin");
+            .env("PATH", path_env);
 
         let tar_status = tar_cmd.status()?;
 
@@ -227,9 +238,9 @@ impl BaseImageBuilder {
     }
 }
 
-fn nix_installer_url(version: &str) -> String {
+fn nix_installer_url(version: &str, arch: &str) -> String {
     const NIX_BASE_URL: &str = "https://releases.nixos.org/nix";
-    format!("{NIX_BASE_URL}/nix-{version}/nix-{version}-{ARCH}-linux.tar.xz")
+    format!("{NIX_BASE_URL}/nix-{version}/nix-{version}-{arch}-linux.tar.xz")
 }
 
 fn write_nix_paths(nix_dir: &Path) -> Result<(), io::Error> {
@@ -317,6 +328,7 @@ pub fn progress_bar(len: u64) -> ProgressBar {
 /// Download and install Nix.
 fn download_and_install_nix(
     version: &str,
+    arch: &str,
     url: &str,
     dest: &Path,
 ) -> Result<()> {
@@ -331,7 +343,7 @@ fn download_and_install_nix(
     fs::create_dir_all(&store_dir)?;
 
     // unpack files
-    let tar_prefix = format!("nix-{version}-{ARCH}-linux");
+    let tar_prefix = format!("nix-{version}-{arch}-linux");
     for file in ar.entries()? {
         let mut f = file?;
         let fpath = f.path()?;
@@ -370,7 +382,7 @@ fn find_nix(store_dir: &Path, version: &str) -> Result<PathBuf> {
 }
 
 /// Install Nix into `dest`
-fn install_nix<P>(dest: P) -> Result<()>
+fn install_nix<P>(arch: &str, dest: P) -> Result<()>
 where
     P: AsRef<Path>,
 {
@@ -385,8 +397,8 @@ where
     let nix_store = dest.join("store");
     if !nix_store.exists() {
         log::info!("installing Nix in {}", dest.display());
-        let nix_url = nix_installer_url(NIX_VERSION);
-        download_and_install_nix(NIX_VERSION, &nix_url, dest)?;
+        let nix_url = nix_installer_url(NIX_VERSION, arch);
+        download_and_install_nix(NIX_VERSION, arch, &nix_url, dest)?;
     }
 
     let nix_bin = dest.join(".bin");
