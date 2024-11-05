@@ -21,10 +21,19 @@ time.
 
 ## Installation
 
-### Prerequisites
-- Rust toolchain (install via [rustup](https://rustup.rs/))
+### Installing from release binary
+
+Download the latest release into `~/.local/bin`:
+```bash
+mkdir -p ~/.local/bin
+curl -sL https://github.com/raphaelcoeffic/dive/releases/latest/download/dive-x86_64-unknown-linux-musl -o ~/.local/bin/dive
+chmod +x ~/.local/bin/dive
+```
 
 ### Building from source
+
+Prerequisites:
+- Rust toolchain (install via [rustup](https://rustup.rs/))
 
 ```bash
 # Build the binary
