@@ -81,8 +81,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Short term
 - 🔧 Add package manager for easy installation of additional debugging tools
-- 📦 Provide static builds for easier distribution
-- 🔄 Embed base image for offline debugging capabilities
+- 🗑️ Add a clean-up command to remove local files
 
 ### Coming later
 - 🐳 Support for more container runtimes
