@@ -1,28 +1,30 @@
 use std::{
     ffi::OsString,
-    fmt::Debug,
-    fs::{create_dir_all, read_link},
+    fs::read_link,
     io,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{self, exit, Command},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
-use namespaces::enter_namespaces_as_root;
-use overlay::OverlayMount;
-use pid_lookup::pid_lookup;
 use procfs::process::Process;
 use rustix::{
-    path::Arg,
-    process::geteuid,
-    thread::{unshare, UnshareFlags},
+    process::{geteuid, waitpid, WaitOptions},
+    runtime::{fork, Fork},
 };
 
 mod namespaces;
 mod overlay;
+mod pid_file;
 mod pid_lookup;
+mod shared_mount;
+
+use namespaces::*;
+use overlay::*;
+use pid_lookup::*;
+use shared_mount::*;
 
 #[cfg(feature = "embedded_image")]
 mod embedded_image;
@@ -72,18 +74,6 @@ fn get_overlay_dir() -> PathBuf {
     dirs::state_dir().unwrap().join(APP_NAME).join(OVL_DIR)
 }
 
-fn make_overlay_dirs() -> Result<(PathBuf, PathBuf, PathBuf)> {
-    let overlay_dir = get_overlay_dir();
-    let upper_dir = overlay_dir.join("upper");
-    let work_dir = overlay_dir.join("work");
-
-    create_dir_all(&upper_dir)
-        .and(create_dir_all(&work_dir))
-        .context("could not create state directory")?;
-
-    Ok((overlay_dir, upper_dir, work_dir))
-}
-
 fn init_logging() {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
@@ -111,73 +101,40 @@ fn reexec_with_sudo(
         .exec())
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    init_logging();
-
-    let lead_pid = if let Ok(pid) = args.container_id.parse::<i32>() {
-        pid
-    } else if let Some(pid) = pid_lookup(&args.container_id) {
-        pid
-    } else {
-        log::error!("could not find container PID");
-        exit(exitcode::NOINPUT);
-    };
-    log::debug!("container PID: {}", lead_pid);
-
-    let img_dir = get_img_dir(&args);
-    if !img_dir.exists() || !img_dir.join("store").exists() {
-        #[cfg(feature = "embedded_image")]
-        embedded_image::install_base_image(&img_dir)
-            .context("could not unpack base image")?;
-
-        #[cfg(not(feature = "embedded_image"))]
-        BaseImageBuilder::new(&img_dir)
-            .build_base()
-            .context("could not build base image")?;
-    }
-
-    let (overlay_dir, upper_dir, work_dir) = make_overlay_dirs()?;
-
-    if !geteuid().is_root() {
-        log::debug!("re-executing with sudo...");
-        reexec_with_sudo(lead_pid, &img_dir, &overlay_dir)?
-    }
-
-    let overlay = match OverlayMount::new(img_dir, upper_dir, work_dir) {
+fn prepare_shell_environment(
+    shared_mount: &SharedMount,
+    lead_pid: i32,
+) -> Result<()> {
+    let detached_mount = match shared_mount.make_detached_mount() {
         Err(err) => {
-            log::error!("could not create base image mount: {:?}", err);
-            exit(exitcode::OSERR);
+            bail!("could not make detached mount: {err}");
         }
-        Ok(mnt) => {
-            log::debug!("detached mount created");
-            mnt
-        }
+        Ok(m) => m,
     };
+    if let Err(err) = enter_namespaces_as_root(lead_pid) {
+        bail!("cannot enter container namespaces: {err}");
+    }
+    if let Err(err) = detached_mount.mount_in_new_namespace("/nix") {
+        bail!("cannot mount /nix: {err}");
+    }
+    Ok(())
+}
 
-    let proc_env = match Process::new(lead_pid).and_then(|p| p.environ()) {
-        Err(err) => {
-            log::error!("could not fetch the process environment: {err}");
-            exit(exitcode::OSERR);
-        }
-        Ok(env) => env,
-    };
-
-    enter_namespaces_as_root(lead_pid)?;
-
-    log::debug!("mounting overlay...");
-    unshare(UnshareFlags::NEWNS)
-        .context("could not create new mount namespace")?;
-    overlay
-        .mount("/nix")
-        .context("could not mount base image")?;
-
+fn exec_shell() -> Result<()> {
+    //
     // TODO: path HOME w/ user as defined by /etc/passwd
-
+    //
     // TODO: find shell in this order:
     // - zsh
     // - bash
     // - sh at last
+
+    let proc_env = match Process::new(1).and_then(|p| p.environ()) {
+        Err(err) => {
+            bail!("could not fetch the process environment: {err}");
+        }
+        Ok(env) => env,
+    };
 
     let mut cmd = Command::new("zsh");
     cmd.env_clear();
@@ -216,7 +173,67 @@ fn main() -> Result<()> {
         ("INFOPATH", format!("{nix_base}/share/info")),
     ]);
 
-    cmd.status()?;
+    let err = cmd.exec();
+    bail!("cannot exec: {}", err)
+}
 
+fn wait_for_child(child_pid: rustix::thread::Pid) -> Result<()> {
+    // TODO: propagate return code properly
+    log::debug!("parent pid = {}", process::id());
+    let _ = waitpid(Some(child_pid), WaitOptions::empty())
+        .context("waitpid failed")?;
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    init_logging();
+
+    let lead_pid = if let Some(pid) = pid_lookup(&args.container_id) {
+        pid
+    } else {
+        log::error!("could not find container PID");
+        exit(exitcode::NOINPUT);
+    };
+    log::debug!("container PID: {}", lead_pid);
+
+    let img_dir = get_img_dir(&args);
+    if !img_dir.exists() || !img_dir.join("store").exists() {
+        #[cfg(feature = "embedded_image")]
+        embedded_image::install_base_image(&img_dir)
+            .context("could not unpack base image")?;
+
+        #[cfg(not(feature = "embedded_image"))]
+        BaseImageBuilder::new(&img_dir)
+            .build_base()
+            .context("could not build base image")?;
+    }
+
+    let overlay_dir = get_overlay_dir();
+    let overlay_builder = OverlayBuilder::new(&overlay_dir, &img_dir)?;
+
+    if !geteuid().is_root() {
+        log::debug!("re-executing with sudo...");
+        reexec_with_sudo(lead_pid, &img_dir, &overlay_dir)?
+    }
+
+    let shared_mount = SharedMount::new(&overlay_dir, overlay_builder)
+        .context("could not init shared mount")?;
+
+    match unsafe { fork()? } {
+        Fork::Child(_) => {
+            if let Err(err) = prepare_shell_environment(&shared_mount, lead_pid)
+            {
+                log::error!("{err}");
+                exit(1);
+            }
+            // in normal cases, there is no return from exec_shell()
+            if let Err(err) = exec_shell() {
+                log::error!("cannot execute shell: {err}");
+                exit(1);
+            }
+            exit(0);
+        }
+        Fork::Parent(child_pid) => wait_for_child(child_pid),
+    }
 }

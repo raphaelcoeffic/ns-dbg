@@ -3,7 +3,7 @@ use std::{
     process::exit,
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use procfs::process::{Namespace, Process};
 use rustix::{
     process::{pidfd_open, Pid, PidfdFlags},
@@ -49,21 +49,18 @@ pub fn enter_namespaces_as_root(lead_pid: i32) -> Result<()> {
     let lead = Process::new(lead_pid)?;
     let lead_ns = match namespace_set(&lead) {
         Err(err) => {
-            log::error!("cannot inspect lead process namespaces: {err}");
-            exit(exitcode::OSERR);
+            bail!("cannot inspect lead process namespaces: {err}");
         }
         Ok(ns) => ns,
     };
-    log::debug!("lead_ns = {:?}", lead_ns);
 
     let me = Process::myself()?;
     let me_id = me.pid;
-    log::debug!("my pid = {}", me_id);
+    log::debug!("own pid is {}", me_id);
 
     let my_ns = match namespace_set(&me) {
         Err(err) => {
-            log::error!("cannot inspect own namespaces: {err}");
-            exit(exitcode::OSERR);
+            bail!("cannot inspect own namespaces: {err}");
         }
         Ok(ns) => ns,
     };
@@ -74,7 +71,6 @@ pub fn enter_namespaces_as_root(lead_pid: i32) -> Result<()> {
         ns_set = ns_set.union(namespace_type_by_name(&ns.0));
     }
 
-    log::debug!("ns_set: {:?}", ns_set);
     if ns_set.is_empty() {
         log::debug!("no point in entering anything: we're already there!");
         return Ok(());
