@@ -333,9 +333,15 @@ fn download_and_install_nix(
     dest: &Path,
 ) -> Result<()> {
     log::info!("downloading {url} into {}", dest.display());
-    let response = reqwest::blocking::get(url)?;
-    let bar = progress_bar(response.content_length().unwrap_or_default());
-    let decoder = XzDecoder::new(bar.wrap_read(response));
+    let response = ureq::get(url).call()?;
+    let content_length: u64 = response
+        .header("Content-Length")
+        .unwrap_or("")
+        .parse()
+        .unwrap_or_default();
+
+    let bar = progress_bar(content_length);
+    let decoder = XzDecoder::new(bar.wrap_read(response.into_reader()));
     let mut ar = Archive::new(decoder);
 
     let dest_dir = Path::new(dest);
