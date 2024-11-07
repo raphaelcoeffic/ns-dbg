@@ -1,0 +1,61 @@
+# set usual editor
+export VISUAL=vim
+export EDITOR=vim
+alias e=$EDITOR
+
+# -- zsh modules
+autoload -Uz compinit
+
+ZSH_HIGHLIGHT_HIGHLIGHTERS=(main brackets pattern cursor line)
+ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=40
+ZSH_AUTOSUGGEST_STRATEGY=(match_prev_cmd)
+
+# prevent prezto dependency loader
+pmodload() {}
+
+zstyle ':prezto:*:*' color yes
+zstyle ':prezto:module:editor' key-bindings emacs
+zstyle ':prezto:module:editor' dot-expansion yes
+zstyle ':prezto:module:utility' safe-ops no
+
+BASE_SHARE=/nix/.base/share
+SITE_FUNCTIONS=$BASE_SHARE/zsh/site-functions
+PRETZO_MODULES=$BASE_SHARE/zsh-prezto/modules
+
+# -- prezto modules
+source $PRETZO_MODULES/helper/init.zsh
+fpath+=( $PRETZO_MODULES/helper )
+source $PRETZO_MODULES/environment/init.zsh
+fpath+=( $PRETZO_MODULES/environment )
+source $PRETZO_MODULES/terminal/init.zsh
+fpath+=( $PRETZO_MODULES/terminal )
+source $PRETZO_MODULES/editor/init.zsh
+fpath+=( $PRETZO_MODULES/editor )
+source $PRETZO_MODULES/utility/init.zsh
+fpath+=( $PRETZO_MODULES/utility )
+
+# -- some extras
+source $SITE_FUNCTIONS/fast-syntax-highlighting.plugin.zsh
+source $BASE_SHARE/zsh-autosuggestions/zsh-autosuggestions.zsh
+
+source $PRETZO_MODULES/completion/init.zsh
+fpath+=( $PRETZO_MODULES/completion )
+
+unsetopt EXTENDED_GLOB
+unsetopt MENU_COMPLETE
+
+setopt AUTO_CD
+setopt AUTO_MENU
+setopt CDABLE_VARS
+setopt CLOBBER
+setopt MULTIOS
+setopt PUSHDSILENT
+
+HISTFILE="${XDG_CACHE_HOME:-$HOME/.cache}/.zsh_history"
+HISTSIZE=10000 # in memory
+SAVEHIST=10000 # persistent
+bindkey -e # emacs keymap
+
+# help stuff
+# echo "Welcome to the dive shell!"
+

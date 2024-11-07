@@ -1,9 +1,10 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use anyhow::Result;
 use image_builder::progress_bar;
 use liblzma::read::XzDecoder;
-use tar::Archive;
+
+use crate::install_base_image_from_reader;
 
 pub fn install_base_image<P>(dest: P) -> Result<()>
 where
@@ -13,9 +14,9 @@ where
     let bar = progress_bar(base_image.len() as u64);
     let decoder = XzDecoder::new(bar.wrap_read(base_image.as_slice()));
 
-    let dest = dest.as_ref();
-    fs::create_dir_all(dest).unwrap();
+    install_base_image_from_reader(dest.as_ref(), decoder)
+}
 
-    log::info!("unpacking base image into {}", dest.display());
-    Ok(Archive::new(decoder).unpack(dest)?)
+pub fn base_image_sha256() -> &'static str {
+    include_str!("../base.sha256").trim()
 }
