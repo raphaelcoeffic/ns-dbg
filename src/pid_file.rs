@@ -11,9 +11,12 @@ pub struct PidFile {
 }
 
 impl PidFile {
-    pub fn new(dir: &Path) -> Result<Self> {
+    pub fn new<P>(dir: P) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
         let pid = process::id().to_string();
-        let path = dir.join(&pid);
+        let path = dir.as_ref().join(&pid);
         std::fs::write(&path, pid)?;
         Ok(PidFile { path })
     }

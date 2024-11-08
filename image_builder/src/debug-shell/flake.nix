@@ -37,12 +37,14 @@
               netcat-openbsd
               procps
               sngrep
+              sqlite
               strace
               tcpdump
               util-linux
               vim
               xz
               zsh
+              zsh-prezto
               zsh-autosuggestions
               zsh-completions
               zsh-fast-syntax-highlighting

@@ -19,6 +19,7 @@ use rustix::{
     runtime::{fork, Fork},
     thread::{unshare, Pid, UnshareFlags},
 };
+use sha2::{Digest, Sha256};
 use tar::Archive;
 use tempfile::tempdir;
 
@@ -33,6 +34,9 @@ static FLAKE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/debug-shell");
 
 // Break compilation if 'flake.nix' does not exist
 static _FLAKE_NIX_GUARD_: &str = include_str!("debug-shell/flake.nix");
+
+static STATIC_FILES: &[(&str, &str)] =
+    &[("/nix/etc/.zshrc", include_str!("etc/zshrc"))];
 
 type PostProcessFn = Box<dyn Fn(&Path) -> Result<()>>;
 
@@ -82,11 +86,7 @@ impl BaseImageBuilder {
     where
         P: AsRef<Path>,
     {
-        let output = output.as_ref();
-        let archive_suffix = if compress { "tar.xz" } else { "tar" };
-        let archive_name = format!("{}.{}", output.display(), archive_suffix);
-
-        self.package_output.replace(PathBuf::from(archive_name));
+        self.package_output.replace(PathBuf::from(output.as_ref()));
         self.compress = compress;
         self
     }
@@ -112,8 +112,28 @@ impl BaseImageBuilder {
         if build_status.is_err() {
             return Self::BUILD_FAILED;
         }
-
         let base_path = build_status.unwrap();
+
+        // copy static files (zshrc, etc)
+        let mut hasher = Sha256::new();
+        hasher.update(base_path.as_os_str().as_encoded_bytes());
+
+        if let Err(err) = STATIC_FILES.iter().try_for_each(|(dest, content)| {
+            hasher.update(content);
+            fs::write(dest, content)
+        }) {
+            log::error!("failed to copy static files: {err}");
+            return Self::POST_PROCESS_FAILED;
+        }
+
+        let hash = hasher.finalize();
+        if let Err(err) =
+            fs::write("/nix/.base.sha256", format!("{:x}\n", hash))
+        {
+            log::error!("failed to write hash file: {err}");
+            return Self::POST_PROCESS_FAILED;
+        }
+
         if let Err(err) = self.do_post_process(&base_path) {
             log::error!("post process failed: {}", err);
             return Self::POST_PROCESS_FAILED;
@@ -200,12 +220,15 @@ impl BaseImageBuilder {
         let nix_set = read_nix_paths("/nix")?;
 
         let mut tar_cmd = Command::new("tar");
+        let archive_suffix = if self.compress { "tar.xz" } else { "tar" };
+        let archive_name = format!("{}.{}", output.display(), archive_suffix);
+
         tar_cmd.args([
             "--directory=/nix",
             "--exclude=var/nix/*",
             "-c",
             "-f",
-            &format!("{}", output.display()),
+            &archive_name,
         ]);
 
         if self.compress {
@@ -220,7 +243,7 @@ impl BaseImageBuilder {
         let path_env = format!("{current_path}/nix/.base/bin");
 
         tar_cmd
-            .args([".bin", ".base", "etc", "var/nix"])
+            .args([".bin", ".base", ".base.sha256", "etc", "var/nix"])
             .args(nix_set.union(&base_set).map(|p| "store/".to_owned() + p))
             .env("PATH", path_env);
 
@@ -233,6 +256,10 @@ impl BaseImageBuilder {
                 bail!("tar was interrupted by signal");
             }
         }
+
+        let sha256_name = format!("{}.sha256", output.display());
+        fs::copy("/nix/.base.sha256", sha256_name)
+            .context("could not copy hash file")?;
 
         Ok(())
     }
@@ -287,7 +314,13 @@ where
 fn chmod_apply(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
     let metadata = fs::metadata(path)?;
     let mode = metadata.permissions().mode();
-    fs::set_permissions(path, fs::Permissions::from_mode(func(mode)))
+    let new_mode = func(mode);
+
+    if new_mode != mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(new_mode))
+    } else {
+        Ok(())
+    }
 }
 
 // fix permissions recursively
