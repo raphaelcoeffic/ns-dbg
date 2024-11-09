@@ -15,21 +15,11 @@ use rustix::{
     runtime::{fork, Fork},
 };
 
-mod base_image;
-mod namespaces;
-mod overlay;
-mod pid_file;
-mod pid_lookup;
-mod shared_mount;
-
-#[cfg(feature = "embedded_image")]
-mod embedded_image;
-
-use base_image::*;
-use namespaces::*;
-use overlay::*;
-use pid_lookup::*;
-use shared_mount::*;
+use dive::base_image::*;
+use dive::namespaces::*;
+use dive::overlay::*;
+use dive::pid_lookup::*;
+use dive::shared_mount::*;
 
 const APP_NAME: &str = "dive";
 const IMG_DIR: &str = "base-img";

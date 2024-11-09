@@ -17,7 +17,8 @@ use rustix::{
     },
 };
 
-use crate::{pid_file::PidFile, OverlayBuilder, OverlayMount};
+use crate::overlay::{OverlayBuilder, OverlayMount};
+use crate::pid_file::PidFile;
 
 pub struct SharedMount {
     _pid_file: PidFile,

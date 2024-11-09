@@ -4,7 +4,7 @@ use anyhow::Result;
 use image_builder::progress_bar;
 use liblzma::read::XzDecoder;
 
-use crate::install_base_image_from_reader;
+use crate::base_image::install_base_image_from_reader;
 
 pub fn install_base_image<P>(dest: P) -> Result<()>
 where
