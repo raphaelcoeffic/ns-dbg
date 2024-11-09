@@ -1,5 +1,5 @@
 use std::{
-    fs::{remove_file, File, OpenOptions},
+    fs::{create_dir_all, remove_file, File, OpenOptions},
     os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
 };
@@ -118,6 +118,7 @@ impl DetachedMount {
     where
         P: AsRef<Path>,
     {
+        create_dir_all(target.as_ref())?;
         move_mount(
             self.0.as_fd(),
             "",

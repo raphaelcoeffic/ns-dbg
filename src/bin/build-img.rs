@@ -5,9 +5,9 @@ use std::{
 
 use anyhow::{bail, Result};
 use clap::Parser;
-
-use image_builder::*;
 use tempfile::TempDir;
+
+use dive::image_builder::*;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -27,6 +27,10 @@ struct Args {
     /// Compress base image
     #[arg(short, long, env)]
     uncompressed: bool,
+
+    /// Shell
+    #[arg(long)]
+    shell_exec: bool,
 
     /// Output name
     #[arg(short, long, env, default_value = "base")]
@@ -102,6 +106,10 @@ fn main() -> Result<()> {
 
     if let Some(flake_dir) = args.flake_dir {
         base_builder.flake_dir(flake_dir);
+    }
+
+    if args.shell_exec {
+        base_builder.shell_exec(true);
     }
 
     if let Some(arch) = args.arch {
