@@ -33,6 +33,7 @@
               kitty.terminfo
               less
               lsof
+              man
               nano
               netcat-openbsd
               procps

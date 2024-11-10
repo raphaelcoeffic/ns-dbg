@@ -1,15 +1,16 @@
 use std::{fs, io, path::Path};
 
 use anyhow::{bail, Result};
-use image_builder::progress_bar;
 use liblzma::read::XzDecoder;
 use tar::Archive;
+
+use crate::image_builder::*;
 
 #[cfg(feature = "embedded_image")]
 use crate::embedded_image;
 
 #[cfg(not(feature = "embedded_image"))]
-use image_builder::BaseImageBuilder;
+use crate::image_builder::BaseImageBuilder;
 
 pub fn update_base_image<P>(dest: &Path, image: Option<P>) -> Result<()>
 where
@@ -96,7 +97,7 @@ where
         log::info!("removing current base image");
         for dir in dest.read_dir()? {
             let path = dir?.path();
-            if let Err(err) = image_builder::chmod(&path, |mode| mode | 0o700) {
+            if let Err(err) = chmod(&path, |mode| mode | 0o700) {
                 log::error!(
                     "could not fix permissions for {}: {}",
                     path.display(),
@@ -104,7 +105,12 @@ where
                 );
                 bail!(err);
             }
-            if let Err(err) = fs::remove_dir_all(&path) {
+            if path.is_dir() {
+                if let Err(err) = fs::remove_dir_all(&path) {
+                    log::error!("could not remove {}: {}", path.display(), err);
+                    bail!(err);
+                }
+            } else if let Err(err) = fs::remove_file(&path) {
                 log::error!("could not remove {}: {}", path.display(), err);
                 bail!(err);
             }

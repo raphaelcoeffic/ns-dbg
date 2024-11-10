@@ -1,5 +1,5 @@
 use std::{
-    fs::{remove_file, File, OpenOptions},
+    fs::{create_dir_all, remove_file, File, OpenOptions},
     os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
 };
@@ -17,7 +17,8 @@ use rustix::{
     },
 };
 
-use crate::{pid_file::PidFile, OverlayBuilder, OverlayMount};
+use crate::overlay::{OverlayBuilder, OverlayMount};
+use crate::pid_file::PidFile;
 
 pub struct SharedMount {
     _pid_file: PidFile,
@@ -117,6 +118,7 @@ impl DetachedMount {
     where
         P: AsRef<Path>,
     {
+        create_dir_all(target.as_ref())?;
         move_mount(
             self.0.as_fd(),
             "",

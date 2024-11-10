@@ -103,7 +103,7 @@ const _RUNTIMES: &[ContainerRuntime] = &[
     },
 ];
 
-pub(crate) fn pid_lookup(value: &str) -> Option<i32> {
+pub fn pid_lookup(value: &str) -> Option<i32> {
     if let Ok(pid) = value.parse::<i32>() {
         return Some(pid);
     };

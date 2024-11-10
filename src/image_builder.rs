@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use liblzma::read::XzDecoder;
 use regex::Regex;
 use rustix::{
-    fs::{bind_mount, recursive_bind_mount},
+    fs::{bind_mount, recursive_bind_mount, unmount, UnmountFlags},
     path::Arg,
     process::{chroot, getgid, getuid, waitpid, WaitOptions},
     runtime::{fork, Fork},
@@ -22,6 +22,8 @@ use rustix::{
 use sha2::{Digest, Sha256};
 use tar::Archive;
 use tempfile::tempdir;
+
+use crate::shell::*;
 
 const NIX_VERSION: &str = "2.24.9";
 
@@ -35,15 +37,16 @@ static FLAKE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/debug-shell");
 // Break compilation if 'flake.nix' does not exist
 static _FLAKE_NIX_GUARD_: &str = include_str!("debug-shell/flake.nix");
 
+static BASE_SHA256: &str = "/nix/.base.sha256";
+static BASE_PATHS: &str = "/nix/.base.paths";
+
 static STATIC_FILES: &[(&str, &str)] =
     &[("/nix/etc/.zshrc", include_str!("etc/zshrc"))];
-
-type PostProcessFn = Box<dyn Fn(&Path) -> Result<()>>;
 
 pub struct BaseImageBuilder {
     nix_dir: PathBuf,
     flake_dir: Option<PathBuf>,
-    post_process: Option<PostProcessFn>,
+    shell_exec: bool,
     package_output: Option<PathBuf>,
     compress: bool,
 }
@@ -60,7 +63,7 @@ impl BaseImageBuilder {
         BaseImageBuilder {
             nix_dir: nix_dir.as_ref().to_owned(),
             flake_dir: None,
-            post_process: None,
+            shell_exec: false,
             package_output: None,
             compress: false,
         }
@@ -74,11 +77,8 @@ impl BaseImageBuilder {
         self
     }
 
-    pub fn post_process(
-        &mut self,
-        func: impl Fn(&Path) -> Result<()> + 'static,
-    ) -> &mut Self {
-        self.post_process.replace(Box::new(func));
+    pub fn shell_exec(&mut self, shell_exec: bool) -> &mut Self {
+        self.shell_exec = shell_exec;
         self
     }
 
@@ -127,19 +127,34 @@ impl BaseImageBuilder {
         }
 
         let hash = hasher.finalize();
-        if let Err(err) =
-            fs::write("/nix/.base.sha256", format!("{:x}\n", hash))
-        {
+        if let Err(err) = fs::write(BASE_SHA256, format!("{:x}\n", hash)) {
             log::error!("failed to write hash file: {err}");
             return Self::POST_PROCESS_FAILED;
         }
 
-        if let Err(err) = self.do_post_process(&base_path) {
-            log::error!("post process failed: {}", err);
+        let gcroots = Path::new("/nix/var/nix/gcroots");
+        let gcroots_nix = gcroots.join("nix");
+        let gcroots_base = gcroots.join("base");
+
+        if let Err(err) =
+            dump_nix_closures([&gcroots_nix, &gcroots_base], BASE_PATHS)
+        {
+            log::error!("failed to write store paths: {err}");
             return Self::POST_PROCESS_FAILED;
         }
 
-        if self.do_package(&base_path).is_err() {
+        if let Err(err) = dump_store_db(BASE_PATHS, "/nix/.base.reginfo") {
+            log::error!("failed to write base store database: {err}");
+            return Self::POST_PROCESS_FAILED;
+        }
+
+        if self.shell_exec {
+            let shell = Shell::new("build-shell");
+            let _ = shell.spawn();
+            return Self::SUCCESS;
+        }
+
+        if self.do_package().is_err() {
             return Self::POST_PROCESS_FAILED;
         }
 
@@ -166,6 +181,10 @@ impl BaseImageBuilder {
         chroot(tmp)?;
         set_current_dir(current_dir)?;
 
+        // import initial DB
+        load_nix_reginfo("/nix/.reginfo")?;
+
+        // build_builtins()
         match &self.flake_dir {
             None => {
                 let flake_tmp = tempdir()?;
@@ -193,59 +212,66 @@ impl BaseImageBuilder {
         }
     }
 
-    fn do_post_process(&self, base_path: &Path) -> Result<()> {
-        if let Some(func) = &self.post_process {
-            func(base_path)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn do_package(&self, base_path: &Path) -> Result<()> {
+    fn do_package(&self) -> Result<()> {
         if self.package_output.is_none() {
-            return Ok(());
+            // no packaging, run garbage collection instead
+            log::info!("running nix garbage collector");
+            return run_nix_gc();
         }
 
         let output = self.package_output.as_ref().unwrap();
-        if self.compress {
-            log::info!(
-                "packaging and compressing base image to {}",
-                output.display(),
-            );
-        } else {
-            log::info!("packaging base image to {}", output.display());
-        }
-
-        let base_set = read_nix_closure(base_path)?;
-        let nix_set = read_nix_paths("/nix")?;
-
-        let mut tar_cmd = Command::new("tar");
         let archive_suffix = if self.compress { "tar.xz" } else { "tar" };
         let archive_name = format!("{}.{}", output.display(), archive_suffix);
 
-        tar_cmd.args([
-            "--directory=/nix",
-            "--exclude=var/nix/*",
-            "-c",
-            "-f",
-            &archive_name,
-        ]);
-
         if self.compress {
-            tar_cmd.args(["-I", "xz -T0"]);
+            log::info!(
+                "packaging and compressing base image to {}",
+                archive_name,
+            );
+        } else {
+            log::info!("packaging base image to {}", archive_name);
         }
+
+        // temporary nix db mount
+        let tmp_db_dir = tempdir()?;
+        bind_mount(tmp_db_dir.path(), "/nix/var/nix/db")
+            .context("failed to mount temporary DB directory")?;
+        load_nix_reginfo("/nix/.base.reginfo")?;
+
+        let mut tar_cmd = Command::new("tar");
 
         // prefer native tar over emulated one
         let current_path = std::env::var_os("PATH")
             .filter(|path| !path.is_empty())
             .map(|path| path.to_string_lossy().into_owned() + ":")
             .unwrap_or_default();
-        let path_env = format!("{current_path}/nix/.base/bin");
 
-        tar_cmd
-            .args([".bin", ".base", ".base.sha256", "etc", "var/nix"])
-            .args(nix_set.union(&base_set).map(|p| "store/".to_owned() + p))
-            .env("PATH", path_env);
+        let path_env = format!("{current_path}/nix/.base/bin");
+        tar_cmd.env("PATH", path_env);
+
+        tar_cmd.args(["--directory=/nix", "-c", "-f", &archive_name]);
+
+        if self.compress {
+            tar_cmd.args(["-I", "xz -T0"]);
+        }
+
+        // file list
+        tar_cmd.args([
+            ".bin",
+            ".base",
+            ".base.paths",
+            ".base.sha256",
+            ".base.reginfo",
+            "etc",
+            "var/nix/db",
+            "var/nix/gcroots/nix",
+            "var/nix/gcroots/base",
+        ]);
+        tar_cmd.args(
+            read_paths_set(BASE_PATHS)?
+                .iter()
+                .map(|p| p.strip_prefix("/nix/").unwrap()),
+        );
 
         let tar_status = tar_cmd.status()?;
 
@@ -257,8 +283,13 @@ impl BaseImageBuilder {
             }
         }
 
+        // remove temporary nix db mount
+        unmount("/nix/var/nix/db", UnmountFlags::empty())
+            .context("could not unmount nix db")?;
+        drop(tmp_db_dir);
+
         let sha256_name = format!("{}.sha256", output.display());
-        fs::copy("/nix/.base.sha256", sha256_name)
+        fs::copy(BASE_SHA256, sha256_name)
             .context("could not copy hash file")?;
 
         Ok(())
@@ -270,45 +301,72 @@ fn nix_installer_url(version: &str, arch: &str) -> String {
     format!("{NIX_BASE_URL}/nix-{version}/nix-{version}-{arch}-linux.tar.xz")
 }
 
-fn write_nix_paths(nix_dir: &Path) -> Result<(), io::Error> {
-    let mut nix_paths = String::new();
-    for dir in nix_dir.join("store").read_dir()? {
-        nix_paths += dir?.path().file_name().unwrap().to_str().unwrap();
-        nix_paths += "\n";
-    }
-
-    fs::create_dir_all(nix_dir.join(".cache"))?;
-    fs::write(nix_dir.join(".cache/nix_paths"), nix_paths)
-}
-
-fn read_nix_paths<P>(nix_dir: P) -> Result<HashSet<String>, io::Error>
+fn read_paths_set<P>(paths_file: P) -> Result<HashSet<String>, io::Error>
 where
     P: AsRef<Path>,
 {
-    Ok(fs::read(nix_dir.as_ref().join(".cache/nix_paths"))?
-        .to_string_lossy()
+    Ok(fs::read_to_string(paths_file.as_ref())?
         .lines()
         .map(|l| l.to_owned())
         .collect())
 }
 
-fn read_nix_closure<P>(path: P) -> Result<HashSet<String>>
+fn dump_nix_closures<I, P, Q>(paths: I, paths_file: Q) -> Result<()>
 where
+    I: IntoIterator<Item = P>,
     P: AsRef<Path>,
+    Q: AsRef<Path>,
 {
-    let path = path.as_ref();
-    let output = Command::new("nix-store")
-        .args(["-qR", path.as_str()?])
+    // same as "nix path-info -r [path]"
+    let mut cmd = Command::new("nix-store");
+    cmd.arg("-qR");
+
+    for path in paths.into_iter() {
+        cmd.arg(path.as_ref().as_os_str());
+    }
+
+    let status = cmd
         .env("PATH", "/nix/.bin")
         .env("NIX_CONF_DIR", "/nix/etc")
-        .output()?;
+        .stdout(fs::File::create(paths_file.as_ref())?)
+        .status()?;
 
-    Ok(output
-        .stdout
-        .to_string_lossy()
-        .lines()
-        .map(|p| p.rsplit('/').next().unwrap().to_owned())
-        .collect())
+    if !status.success() {
+        if let Some(exit_code) = status.code() {
+            bail!("'nix-store -qR' failed with {}", exit_code);
+        } else {
+            bail!("'nix-store -qR' was interrupted by signal");
+        }
+    }
+
+    Ok(())
+}
+
+fn dump_store_db<P, Q>(paths_file: P, dest: Q) -> Result<()>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    let mut cmd = Command::new("nix-store");
+
+    cmd.arg("--dump-db");
+    cmd.args(fs::read_to_string(paths_file.as_ref())?.lines());
+
+    let status = cmd
+        .env("PATH", "/nix/.bin")
+        .env("NIX_CONF_DIR", "/nix/etc")
+        .stdout(fs::File::create(dest.as_ref())?)
+        .status()?;
+
+    if !status.success() {
+        if let Some(exit_code) = status.code() {
+            bail!("'nix-store --dump-db' failed with {}", exit_code);
+        } else {
+            bail!("'nix-store --dump-db' was interrupted by signal");
+        }
+    }
+
+    Ok(())
 }
 
 fn chmod_apply(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
@@ -383,12 +441,13 @@ fn download_and_install_nix(
 
     // unpack files
     let tar_prefix = format!("nix-{version}-{arch}-linux");
+    let reginfo = Path::new(".reginfo");
     for file in ar.entries()? {
         let mut f = file?;
         let fpath = f.path()?;
 
         if let Ok(fpath) = fpath.strip_prefix(&tar_prefix) {
-            if fpath.starts_with("store") {
+            if fpath.starts_with("store") || fpath == reginfo {
                 f.unpack(dest_dir.join(fpath))?;
             }
         }
@@ -398,8 +457,6 @@ fn download_and_install_nix(
         let path = dir?.path();
         chmod(&path, |mode| mode & 0o555)?;
     }
-
-    write_nix_paths(dest)?;
 
     Ok(())
 }
@@ -441,10 +498,14 @@ where
     }
 
     let nix_bin = dest.join(".bin");
+    let gcroots = dest.join("var/nix/gcroots");
+    fs::create_dir_all(&gcroots)?;
+
     if !nix_bin.exists() {
         let nix_store_path = find_nix(&nix_store, NIX_VERSION)?;
         let nix_path = Path::new("/nix/store").join(nix_store_path);
         symlink(nix_path.join("bin"), nix_bin)?;
+        symlink(&nix_path, gcroots.join("nix"))?;
     }
 
     Ok(())
@@ -452,8 +513,66 @@ where
 
 fn symlink_base<P: AsRef<Path>>(base_path: P) -> Result<(), io::Error> {
     let base_link = Path::new("/nix/.base");
+    let gcroots = Path::new("/nix/var/nix/gcroots");
+    let gcroots_base = gcroots.join("base");
+    fs::create_dir_all(gcroots)?;
+
     let _ = fs::remove_file(base_link);
-    symlink(&base_path, base_link)
+    symlink(&base_path, base_link)?;
+
+    let _ = fs::remove_file(&gcroots_base);
+    symlink(&base_path, &gcroots_base)
+}
+
+fn load_nix_reginfo<P: AsRef<Path>>(db_dump: P) -> Result<()> {
+    let env = [
+        ("PATH", "/nix/.bin"),
+        ("NIX_CONF_DIR", "/nix/etc"),
+        ("XDG_CACHE_HOME", "/nix/.cache"),
+        ("XDG_CONFIG_HOME", "/nix/.config"),
+    ];
+
+    let reginfo = fs::File::open(db_dump.as_ref())?;
+    let status = Command::new("nix-store")
+        .arg("--load-db")
+        .envs(env)
+        .stdin(reginfo)
+        .status()?;
+
+    if !status.success() {
+        if let Some(exit_code) = status.code() {
+            bail!("'nix-store --load-db' failed with {}", exit_code);
+        } else {
+            bail!("'nix-store --load-db' was interrupted by signal");
+        }
+    }
+
+    Ok(())
+}
+
+fn run_nix_gc() -> Result<()> {
+    let env = [
+        ("PATH", "/nix/.bin"),
+        ("NIX_CONF_DIR", "/nix/etc"),
+        ("XDG_CACHE_HOME", "/nix/.cache"),
+        ("XDG_CONFIG_HOME", "/nix/.config"),
+    ];
+
+    let status = Command::new("nix")
+        .args(["store", "gc"])
+        .envs(env)
+        .stdout(Stdio::null())
+        .status()?;
+
+    if !status.success() {
+        if let Some(exit_code) = status.code() {
+            bail!("'nix store gc' failed with {}", exit_code);
+        } else {
+            bail!("'nix store gc' was interrupted by signal");
+        }
+    }
+
+    Ok(())
 }
 
 /// Build base Nix Flake

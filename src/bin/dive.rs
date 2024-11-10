@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     fs::read_link,
     io,
     os::unix::process::CommandExt,
@@ -15,27 +14,16 @@ use rustix::{
     runtime::{fork, Fork},
 };
 
-mod base_image;
-mod namespaces;
-mod overlay;
-mod pid_file;
-mod pid_lookup;
-mod shared_mount;
-
-#[cfg(feature = "embedded_image")]
-mod embedded_image;
-
-use base_image::*;
-use namespaces::*;
-use overlay::*;
-use pid_lookup::*;
-use shared_mount::*;
+use dive::base_image::*;
+use dive::namespaces::*;
+use dive::overlay::*;
+use dive::pid_lookup::*;
+use dive::shared_mount::*;
+use dive::shell::*;
 
 const APP_NAME: &str = "dive";
 const IMG_DIR: &str = "base-img";
 const OVL_DIR: &str = "overlay";
-
-const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 const ENV_IMG_DIR: &str = "_IMG_DIR";
 const ENV_OVL_DIR: &str = "_OVL_DIR";
@@ -133,76 +121,6 @@ fn prepare_shell_environment(
     Ok(())
 }
 
-fn exec_shell(container_id: &str) -> Result<()> {
-    //
-    // TODO: path HOME w/ user as defined by /etc/passwd
-    //
-    // TODO: find shell in this order:
-    // - zsh
-    // - bash
-    // - sh at last
-
-    let proc_env = match Process::new(1).and_then(|p| p.environ()) {
-        Err(err) => {
-            bail!("could not fetch the process environment: {err}");
-        }
-        Ok(env) => env,
-    };
-
-    let mut cmd = Command::new("zsh");
-    cmd.env_clear();
-    cmd.envs(&proc_env);
-
-    let proc_path = if let Some(path) = proc_env
-        .get(&OsString::from("PATH"))
-        .filter(|v| !v.is_empty())
-    {
-        path.to_string_lossy().into_owned()
-    } else {
-        DEFAULT_PATH.to_string()
-    };
-
-    // TODO: these variable except for TERM should be initialized in zshenv
-    let nix_bin_path = "/nix/.base/sbin:/nix/.base/bin:/nix/.bin";
-    cmd.env("PATH", format!("{nix_bin_path}:{proc_path}"));
-
-    if let Ok(term) = std::env::var("TERM") {
-        cmd.env("TERM", term);
-    } else {
-        cmd.env("TERM", "xterm");
-    }
-
-    if let Ok(lang) = std::env::var("LANG") {
-        cmd.env("LANG", lang);
-    } else {
-        cmd.env("LANG", "C.UTF-8");
-    }
-
-    let prompt = format!(
-        "%F{{cyan}}({container_id}) %F{{blue}}%~ %(?.%F{{green}}.%F{{red}})%#%f "
-    );
-    cmd.env("PROMPT", &prompt);
-
-    let nix_base = "/nix/.base";
-    let data_dir = format!("/usr/local/share:/usr/share:{nix_base}/share");
-    cmd.envs([
-        ("ZDOTDIR", "/nix/etc"),
-        ("NIX_CONF_DIR", "/nix/etc"),
-        ("XDG_CACHE_HOME", "/nix/.cache"),
-        ("XDG_CONFIG_HOME", "/nix/.config"),
-        ("XDG_DATA_DIR", &data_dir),
-    ]);
-
-    cmd.envs([
-        ("TERMINFO_DIRS", format!("{nix_base}/share/terminfo")),
-        ("LIBEXEC_PATH", format!("{nix_base}/libexec")),
-        ("INFOPATH", format!("{nix_base}/share/info")),
-    ]);
-
-    let err = cmd.exec();
-    bail!("cannot exec: {}", err)
-}
-
 fn wait_for_child(child_pid: rustix::thread::Pid) -> Result<()> {
     // TODO: propagate return code properly
     log::debug!("parent pid = {}", process::id());
@@ -246,8 +164,22 @@ fn main() -> Result<()> {
                 log::error!("{err}");
                 exit(1);
             }
+
+            let proc_env = match Process::new(1).and_then(|p| p.environ()) {
+                Err(err) => {
+                    log::error!(
+                        "could not fetch the process environment: {err}"
+                    );
+                    exit(1);
+                }
+                Ok(env) => env,
+            };
+
+            let mut shell = Shell::new(&args.container_id);
+            shell.env(proc_env);
+
             // in normal cases, there is no return from exec_shell()
-            if let Err(err) = exec_shell(&args.container_id) {
+            if let Err(err) = shell.exec() {
                 log::error!("cannot execute shell: {err}");
                 exit(1);
             }
