@@ -34,6 +34,7 @@ jobs:
         ARCH: ${{ matrix.platform.arch }}
       run: |
         if [ "$ARCH" != "$(uname -m)" ]; then
+          sudo apt-get update
           sudo apt-get install qemu-user-static
         fi
         cargo run --bin build-img -- -a $ARCH
