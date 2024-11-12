@@ -19,7 +19,7 @@ liblzma = { version = "0.3.4", features = ["static"] }
 log = "0.4.22"
 procfs = { version= "0.17.0" }
 regex = "1.11.1"
-rustix = { version = "0.38.37", features = ["process", "thread", "mount", "fs", "runtime"] }
+rustix = { version = "0.38.40", features = ["process", "thread", "mount", "fs", "runtime"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.8"
