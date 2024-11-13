@@ -28,8 +28,9 @@ use crate::shell::*;
 const NIX_VERSION: &str = "2.24.9";
 
 const NIX_CONF: &str = "experimental-features = nix-command flakes
-sandbox = false
+extra-nix-path = nixpkgs=flake:nixpkgs
 build-users-group =
+sandbox = false
 ";
 
 static FLAKE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/debug-shell");
@@ -114,9 +115,10 @@ impl BaseImageBuilder {
         }
         let base_path = build_status.unwrap();
 
-        // copy static files (zshrc, etc)
+        // hash & copy static files (zshrc, etc)
         let mut hasher = Sha256::new();
         hasher.update(base_path.as_os_str().as_encoded_bytes());
+        hasher.update(NIX_CONF);
 
         if let Err(err) = STATIC_FILES.iter().try_for_each(|(dest, content)| {
             hasher.update(content);
