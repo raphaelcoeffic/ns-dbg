@@ -1,11 +1,16 @@
 use std::{
-    collections::HashSet, ffi::OsString, iter::IntoIterator, os::fd::AsFd,
+    collections::HashSet,
+    ffi::OsString,
+    iter::IntoIterator,
+    os::fd::{AsFd, AsRawFd},
+    path::Path,
     process::exit,
 };
 
 use anyhow::{bail, Result};
 use procfs::process::{Namespace, Process};
 use rustix::{
+    fs::{open, Mode, OFlags},
     process::{pidfd_open, Pid, PidfdFlags},
     thread::{
         move_into_thread_name_spaces, set_thread_gid, set_thread_uid, Gid,
@@ -55,9 +60,6 @@ pub fn enter_namespaces_as_root(lead_pid: i32) -> Result<()> {
     };
 
     let me = Process::myself()?;
-    let me_id = me.pid;
-    log::debug!("own pid is {}", me_id);
-
     let my_ns = match namespace_set(&me) {
         Err(err) => {
             bail!("cannot inspect own namespaces: {err}");
@@ -90,4 +92,46 @@ pub fn enter_namespaces_as_root(lead_pid: i32) -> Result<()> {
     set_thread_gid(Gid::ROOT)?;
 
     Ok(())
+}
+
+// #define NSIO 0xb7
+// #define NS_GET_OWNER_UID _IO(NSIO, 0x4)
+//
+// uid_t uid;
+// ioctl(userns_fd, NS_GET_OWNER_UID, &uid);
+
+use libc::uid_t;
+use std::os::raw::c_ulong;
+
+const NSIO: u32 = 0xb7;
+const NS_GET_OWNER_UID: c_ulong = ioctl_sys::io!(NSIO, 0x4) as c_ulong;
+
+pub fn get_userns_uid(pid: i32) -> Result<u32> {
+    let proc_pid = Path::new("/proc").join(pid.to_string());
+    if !proc_pid.exists() {
+        bail!("process does not exist");
+    }
+
+    let userns_file = proc_pid.join("ns/user");
+    match open(userns_file, OFlags::RDONLY, Mode::empty()) {
+        Err(err) => bail!("cannot open userns: {:?}", err),
+        Ok(userns_fd) => {
+            let mut uid: uid_t = 0;
+            let ret = unsafe {
+                ioctl_sys::ioctl(
+                    userns_fd.as_raw_fd(),
+                    NS_GET_OWNER_UID,
+                    &mut uid as *mut uid_t,
+                )
+            };
+            if ret < 0 {
+                bail!(
+                    "cannot get userns uid: {}",
+                    std::io::Error::last_os_error()
+                )
+            } else {
+                Ok(uid as u32)
+            }
+        }
+    }
 }

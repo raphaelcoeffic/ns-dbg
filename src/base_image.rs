@@ -24,7 +24,6 @@ where
         None
     };
 
-    log::debug!("image = {:?}", image);
     let image_sha256 = if let Some(image) = &image {
         Some(
             fs::read(format!("{}.sha256", image.as_ref().display()))?
@@ -43,7 +42,7 @@ where
 
         #[cfg(not(feature = "embedded_image"))]
         {
-            log::debug!("no image");
+            log::debug!("no embedded image");
             None
         }
     };

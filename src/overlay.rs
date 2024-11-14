@@ -1,4 +1,4 @@
-use std::fs::create_dir_all;
+use std::fs::{create_dir_all, OpenOptions};
 use std::path::Path;
 use std::{os::fd::OwnedFd, path::PathBuf};
 
@@ -13,17 +13,20 @@ use rustix::mount::{
 pub struct OverlayMount(OwnedFd);
 
 impl OverlayMount {
-    pub fn new<L: Into<PathBuf>, D: AsRef<Path>>(
+    pub fn new<L: Into<PathBuf>, U: Into<PathBuf>, W: Into<PathBuf>>(
         lower_dir: L,
-        upper_dir: D,
-        work_dir: D,
+        upper_dir: U,
+        work_dir: W,
     ) -> Result<Self> {
         let lower_dir = lower_dir.into().canonicalize()?;
+        let upper_dir = upper_dir.into().canonicalize()?;
+        let work_dir = work_dir.into().canonicalize()?;
+
         let fsfd = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC)?;
         fsconfig_set_string(fsfd.as_fd(), "source", "user-data")?;
         fsconfig_set_string(fsfd.as_fd(), "lowerdir", lower_dir)?;
-        fsconfig_set_string(fsfd.as_fd(), "upperdir", upper_dir.as_ref())?;
-        fsconfig_set_string(fsfd.as_fd(), "workdir", work_dir.as_ref())?;
+        fsconfig_set_string(fsfd.as_fd(), "upperdir", upper_dir)?;
+        fsconfig_set_string(fsfd.as_fd(), "workdir", work_dir)?;
         fsconfig_create(fsfd.as_fd())?;
 
         let fd_mnt = fsmount(
@@ -69,8 +72,8 @@ impl OverlayBuilder {
         let lower_dir = lower_dir.as_ref().to_owned();
 
         let merged_dir = base_dir.join("merged");
-        let upper_dir = base_dir.join("upper");
-        let work_dir = base_dir.join("work");
+        let upper_dir = base_dir.join("layers/upper");
+        let work_dir = base_dir.join("layers/work");
         let pids_dir = base_dir.join("pids");
 
         create_dir_all(&merged_dir)
@@ -78,6 +81,11 @@ impl OverlayBuilder {
             .and(create_dir_all(&work_dir))
             .and(create_dir_all(&pids_dir))
             .context("could not create overlay directories")?;
+
+        let _ = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(base_dir.join("lock"))?;
 
         Ok(OverlayBuilder {
             lower_dir,

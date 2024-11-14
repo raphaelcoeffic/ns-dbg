@@ -306,6 +306,8 @@ dependencies = [
  "fd-lock",
  "include_dir",
  "indicatif",
+ "ioctl-sys",
+ "libc",
  "liblzma",
  "log",
  "procfs",
@@ -669,6 +671,12 @@ checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "ioctl-sys"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bd11f3a29434026f5ff98c730b668ba74b1033637b8817940b54d040696133c"
 
 [[package]]
 name = "is_terminal_polyfill"
