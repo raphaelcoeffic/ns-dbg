@@ -3,7 +3,7 @@ use std::{
     io,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{self, exit, Command},
+    process::{exit, Command},
 };
 
 use anyhow::{bail, Context, Result};
@@ -16,17 +16,15 @@ use rustix::{
 
 use dive::base_image::*;
 use dive::namespaces::*;
-use dive::overlay::*;
 use dive::pid_lookup::*;
 use dive::shared_mount::*;
 use dive::shell::*;
 
 const APP_NAME: &str = "dive";
 const IMG_DIR: &str = "base-img";
-const OVL_DIR: &str = "overlay";
 
 const ENV_IMG_DIR: &str = "_IMG_DIR";
-const ENV_OVL_DIR: &str = "_OVL_DIR";
+const ENV_STATE_DIR: &str = "_STATE_DIR";
 const ENV_LEAD_PID: &str = "_LEAD_PID";
 
 /// Container debug CLI
@@ -62,11 +60,11 @@ fn get_img_dir(args: &Args) -> PathBuf {
     dirs::state_dir().unwrap().join(APP_NAME).join(IMG_DIR)
 }
 
-fn get_overlay_dir() -> PathBuf {
-    if let Ok(ovl_dir) = std::env::var(ENV_OVL_DIR) {
+fn get_state_dir() -> PathBuf {
+    if let Ok(ovl_dir) = std::env::var(ENV_STATE_DIR) {
         return PathBuf::from(ovl_dir);
     }
-    dirs::state_dir().unwrap().join(APP_NAME).join(OVL_DIR)
+    dirs::state_dir().unwrap().join(APP_NAME)
 }
 
 fn init_logging() {
@@ -82,7 +80,7 @@ fn reexec_with_sudo(
     container_id: &str,
     lead_pid: i32,
     img_dir: &Path,
-    overlay_dir: &Path,
+    state_dir: &Path,
 ) -> Result<(), io::Error> {
     let self_exe = read_link("/proc/self/exe")?;
     let loglevel = std::env::var("LOGLEVEL").unwrap_or_default();
@@ -91,7 +89,7 @@ fn reexec_with_sudo(
             format!("LOGLEVEL={}", loglevel),
             format!("{}={}", ENV_LEAD_PID, lead_pid),
             format!("{}={}", ENV_IMG_DIR, img_dir.display()),
-            format!("{}={}", ENV_OVL_DIR, overlay_dir.display()),
+            format!("{}={}", ENV_STATE_DIR, state_dir.display()),
             format!("{}", self_exe.display()),
         ])
         .arg(container_id)
@@ -108,10 +106,11 @@ fn prepare_shell_environment(
 ) -> Result<()> {
     let detached_mount = match shared_mount.make_detached_mount() {
         Err(err) => {
-            bail!("could not make detached mount: {err}");
+            bail!("could not make detached mount: {:?}", err);
         }
         Ok(m) => m,
     };
+
     if let Err(err) = enter_namespaces_as_root(lead_pid) {
         bail!("cannot enter container namespaces: {err}");
     }
@@ -123,7 +122,6 @@ fn prepare_shell_environment(
 
 fn wait_for_child(child_pid: rustix::thread::Pid) -> Result<()> {
     // TODO: propagate return code properly
-    log::debug!("parent pid = {}", process::id());
     let _ = waitpid(Some(child_pid), WaitOptions::empty())
         .context("waitpid failed")?;
     Ok(())
@@ -146,15 +144,16 @@ fn main() -> Result<()> {
         update_base_image(&img_dir, args.base_img)?;
     }
 
-    let overlay_dir = get_overlay_dir();
-    let overlay_builder = OverlayBuilder::new(&overlay_dir, &img_dir)?;
+    let state_dir = get_state_dir();
+    let mnt_builder = SharedMountBuilder::new(&state_dir, &img_dir)?;
 
     if !geteuid().is_root() {
         log::debug!("re-executing with sudo...");
-        reexec_with_sudo(&args.container_id, lead_pid, &img_dir, &overlay_dir)?
+        reexec_with_sudo(&args.container_id, lead_pid, &img_dir, &state_dir)?
     }
 
-    let shared_mount = SharedMount::new(&overlay_dir, overlay_builder)
+    let shared_mount = mnt_builder
+        .make_mount(lead_pid)
         .context("could not init shared mount")?;
 
     match unsafe { fork()? } {
