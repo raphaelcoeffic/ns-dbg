@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
+    fs::create_dir_all,
     os::unix::process::CommandExt,
     process::{self, exit, Command},
 };
@@ -100,6 +101,7 @@ impl Shell {
             ("INFOPATH", format!("{nix_base}/share/info")),
         ]);
 
+        let _ = create_dir_all("/nix/.cache");
         let err = cmd.exec();
         bail!("cannot exec: {}", err)
     }

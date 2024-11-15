@@ -96,7 +96,7 @@ where
         log::info!("removing current base image");
         for dir in dest.read_dir()? {
             let path = dir?.path();
-            if let Err(err) = chmod(&path, |mode| mode | 0o700) {
+            if let Err(err) = chmod_dirs(&path, |mode| mode | 0o700) {
                 log::error!(
                     "could not fix permissions for {}: {}",
                     path.display(),

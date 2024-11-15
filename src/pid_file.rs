@@ -24,7 +24,6 @@ impl PidFile {
 
 impl Drop for PidFile {
     fn drop(&mut self) {
-        log::debug!("removing {}", self.path.display());
         if let Err(err) = fs::remove_file(&self.path) {
             log::error!("while removing: {}", err);
         }

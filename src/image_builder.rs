@@ -97,7 +97,7 @@ impl BaseImageBuilder {
     }
 
     pub fn build_base_with_arch(&self, arch: &str) -> Result<()> {
-        install_nix(arch, &self.nix_dir)?;
+        install_nix(arch, &self.nix_dir).context("could not install Nix")?;
         log::info!("building base image");
 
         let tmp = tempdir()?;
@@ -406,6 +406,17 @@ pub fn chmod(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
     Ok(())
 }
 
+pub fn chmod_dirs(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
+    if fs::symlink_metadata(path)?.file_type().is_dir() {
+        for entry in path.read_dir()? {
+            chmod_dirs(&entry?.path(), func)?;
+        }
+        chmod_apply(path, func)?;
+    }
+
+    Ok(())
+}
+
 pub fn progress_bar(len: u64) -> ProgressBar {
     ProgressBar::new(len).with_style(
         ProgressStyle::with_template(
@@ -503,14 +514,18 @@ where
     let gcroots = dest.join("var/nix/gcroots");
     fs::create_dir_all(&gcroots)?;
 
-    if !nix_bin.exists() {
+    if !symlink_exists(&nix_bin) {
         let nix_store_path = find_nix(&nix_store, NIX_VERSION)?;
         let nix_path = Path::new("/nix/store").join(nix_store_path);
-        symlink(nix_path.join("bin"), nix_bin)?;
-        symlink(&nix_path, gcroots.join("nix"))?;
+        symlink(nix_path.join("bin"), nix_bin).unwrap();
+        symlink(&nix_path, gcroots.join("nix")).unwrap();
     }
 
     Ok(())
+}
+
+fn symlink_exists<P: AsRef<Path>>(path: P) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|f| f.file_type().is_symlink())
 }
 
 fn symlink_base<P: AsRef<Path>>(base_path: P) -> Result<(), io::Error> {
