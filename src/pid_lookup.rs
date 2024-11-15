@@ -73,7 +73,7 @@ fn nspawn_get_pid(name: &str) -> Option<i32> {
         ["show", "-p", "Leader", "--value", "--no-pager", name],
         |output| {
             if let Ok(str) = std::str::from_utf8(output) {
-                if let Ok(pid) = str.parse::<i32>() {
+                if let Ok(pid) = str.trim().parse::<i32>() {
                     return Some(pid);
                 }
             }
