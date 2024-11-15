@@ -70,7 +70,7 @@ fn pockerd_get_pid(cmd: &str, name: &str) -> Option<i32> {
 fn nspawn_get_pid(name: &str) -> Option<i32> {
     get_pid_cmd(
         "machinectl",
-        ["show", "-p", "Leader", "--value", name],
+        ["show", "-p", "Leader", "--value", "--no-pager", name],
         |output| {
             if let Ok(str) = std::str::from_utf8(output) {
                 if let Ok(pid) = str.parse::<i32>() {
