@@ -25,7 +25,7 @@ use tempfile::tempdir;
 
 use crate::shell::*;
 
-const NIX_VERSION: &str = "2.24.9";
+const NIX_VERSION: &str = "2.25.2";
 
 const NIX_CONF: &str = "experimental-features = nix-command flakes
 extra-nix-path = nixpkgs=flake:nixpkgs
