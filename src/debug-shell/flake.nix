@@ -1,8 +1,8 @@
 {
   description = "A debug shell";
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/347cbac9859f2023856b6e595570adb72e5c3f69";
-    flake-utils.url = "github:numtide/flake-utils/c1dfcf08411b08f6b8615f7d8971a2bfa81d5e8a";
+    nixpkgs.url = "flake:nixpkgs";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
@@ -15,6 +15,7 @@
             name = "debug-shell";
             paths = with pkgs; [
               bash
+              cacert
               coreutils
               curl
               diffutils

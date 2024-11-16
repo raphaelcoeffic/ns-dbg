@@ -90,6 +90,10 @@ impl Shell {
         cmd.envs([
             ("ZDOTDIR", "/nix/etc"),
             ("NIX_CONF_DIR", "/nix/etc"),
+            (
+                "NIX_SSL_CERT_FILE",
+                "/nix/.base/etc/ssl/certs/ca-bundle.crt",
+            ),
             ("XDG_CACHE_HOME", "/nix/.cache"),
             ("XDG_CONFIG_HOME", "/nix/.config"),
             ("XDG_DATA_DIR", &data_dir),
