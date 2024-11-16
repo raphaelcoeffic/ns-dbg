@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use include_dir::{include_dir, Dir};
 use indicatif::{ProgressBar, ProgressStyle};
 use liblzma::read::XzDecoder;
 use regex::Regex;
@@ -23,6 +22,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tempfile::tempdir;
 
+use crate::nixos;
 use crate::shell::*;
 
 const NIX_VERSION: &str = "2.25.2";
@@ -32,11 +32,6 @@ extra-nix-path = nixpkgs=flake:nixpkgs
 build-users-group =
 sandbox = false
 ";
-
-static FLAKE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/debug-shell");
-
-// Break compilation if 'flake.nix' does not exist
-static _FLAKE_NIX_GUARD_: &str = include_str!("debug-shell/flake.nix");
 
 static BASE_SHA256: &str = "/nix/.base.sha256";
 static BASE_PATHS: &str = "/nix/.base.paths";
@@ -139,13 +134,14 @@ impl BaseImageBuilder {
         let gcroots_base = gcroots.join("base");
 
         if let Err(err) =
-            dump_nix_closures([&gcroots_nix, &gcroots_base], BASE_PATHS)
+            nixos::dump_closures([&gcroots_nix, &gcroots_base], BASE_PATHS)
         {
             log::error!("failed to write store paths: {err}");
             return Self::POST_PROCESS_FAILED;
         }
 
-        if let Err(err) = dump_store_db(BASE_PATHS, "/nix/.base.reginfo") {
+        if let Err(err) = nixos::dump_store_db(BASE_PATHS, "/nix/.base.reginfo")
+        {
             log::error!("failed to write base store database: {err}");
             return Self::POST_PROCESS_FAILED;
         }
@@ -189,34 +185,20 @@ impl BaseImageBuilder {
 
         // import initial DB
         log::debug!("import initial DB");
-        load_nix_reginfo("/nix/.reginfo")?;
+        nixos::load_store_db("/nix/.reginfo")?;
 
-        // build_builtins()
-        match &self.flake_dir {
-            None => {
-                let flake_tmp = tempdir()?;
-                let flake_dir = flake_tmp.path();
+        // build base flake
+        let store_path = match &self.flake_dir {
+            None => nixos::build_flake_from_package_list(
+                "debug-shell",
+                "A debug shell",
+                crate::BASE_PACKAGES,
+            )?,
+            Some(flake_dir) => nixos::build_flake(flake_dir)?,
+        };
+        symlink_base(&store_path)?;
 
-                let flake_nix = FLAKE_DIR.get_file("flake.nix");
-                if let Some(flake_nix) = flake_nix {
-                    fs::write(
-                        flake_dir.join("flake.nix"),
-                        flake_nix.contents(),
-                    )?;
-                }
-
-                let flake_lock = FLAKE_DIR.get_file("flake.lock");
-                if let Some(flake_lock) = flake_lock {
-                    fs::write(
-                        flake_dir.join("flake.lock"),
-                        flake_lock.contents(),
-                    )?;
-                }
-
-                build_base_flake(flake_dir)
-            }
-            Some(flake_dir) => build_base_flake(flake_dir),
-        }
+        Ok(store_path)
     }
 
     fn do_package(&self) -> Result<()> {
@@ -316,64 +298,6 @@ where
         .lines()
         .map(|l| l.to_owned())
         .collect())
-}
-
-fn dump_nix_closures<I, P, Q>(paths: I, paths_file: Q) -> Result<()>
-where
-    I: IntoIterator<Item = P>,
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    // same as "nix path-info -r [path]"
-    let mut cmd = Command::new("nix-store");
-    cmd.arg("-qR");
-
-    for path in paths.into_iter() {
-        cmd.arg(path.as_ref().as_os_str());
-    }
-
-    let status = cmd
-        .env("PATH", "/nix/.bin")
-        .env("NIX_CONF_DIR", "/nix/etc")
-        .stdout(fs::File::create(paths_file.as_ref())?)
-        .status()?;
-
-    if !status.success() {
-        if let Some(exit_code) = status.code() {
-            bail!("'nix-store -qR' failed with {}", exit_code);
-        } else {
-            bail!("'nix-store -qR' was interrupted by signal");
-        }
-    }
-
-    Ok(())
-}
-
-fn dump_store_db<P, Q>(paths_file: P, dest: Q) -> Result<()>
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    let mut cmd = Command::new("nix-store");
-
-    cmd.arg("--dump-db");
-    cmd.args(fs::read_to_string(paths_file.as_ref())?.lines());
-
-    let status = cmd
-        .env("PATH", "/nix/.bin")
-        .env("NIX_CONF_DIR", "/nix/etc")
-        .stdout(fs::File::create(dest.as_ref())?)
-        .status()?;
-
-    if !status.success() {
-        if let Some(exit_code) = status.code() {
-            bail!("'nix-store --dump-db' failed with {}", exit_code);
-        } else {
-            bail!("'nix-store --dump-db' was interrupted by signal");
-        }
-    }
-
-    Ok(())
 }
 
 fn chmod_apply(path: &Path, func: fn(u32) -> u32) -> Result<(), io::Error> {
@@ -534,7 +458,7 @@ fn symlink_exists<P: AsRef<Path>>(path: P) -> bool {
 }
 
 fn symlink_base<P: AsRef<Path>>(base_path: P) -> Result<(), io::Error> {
-    let base_link = Path::new("/nix/.base");
+    let base_link = Path::new(crate::BASE_DIR);
     let gcroots = Path::new("/nix/var/nix/gcroots");
     let gcroots_base = gcroots.join("base");
     fs::create_dir_all(gcroots)?;
@@ -547,17 +471,10 @@ fn symlink_base<P: AsRef<Path>>(base_path: P) -> Result<(), io::Error> {
 }
 
 fn load_nix_reginfo<P: AsRef<Path>>(db_dump: P) -> Result<()> {
-    let env = [
-        ("PATH", "/nix/.bin"),
-        ("NIX_CONF_DIR", "/nix/etc"),
-        ("XDG_CACHE_HOME", "/nix/.cache"),
-        ("XDG_CONFIG_HOME", "/nix/.config"),
-    ];
-
     let reginfo = fs::File::open(db_dump.as_ref())?;
     let status = Command::new("nix-store")
         .arg("--load-db")
-        .envs(env)
+        .envs(nixos::ENV_VARS)
         .stdin(reginfo)
         .status()?;
 
@@ -573,16 +490,9 @@ fn load_nix_reginfo<P: AsRef<Path>>(db_dump: P) -> Result<()> {
 }
 
 fn run_nix_gc() -> Result<()> {
-    let env = [
-        ("PATH", "/nix/.bin"),
-        ("NIX_CONF_DIR", "/nix/etc"),
-        ("XDG_CACHE_HOME", "/nix/.cache"),
-        ("XDG_CONFIG_HOME", "/nix/.config"),
-    ];
-
     let status = Command::new("nix")
         .args(["store", "gc"])
-        .envs(env)
+        .envs(nixos::ENV_VARS)
         .stdout(Stdio::null())
         .status()?;
 
@@ -595,50 +505,6 @@ fn run_nix_gc() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Build base Nix Flake
-fn build_base_flake<P>(flake_dir: P) -> Result<PathBuf>
-where
-    P: AsRef<Path>,
-{
-    let env = [
-        ("PATH", "/nix/.bin"),
-        ("NIX_CONF_DIR", "/nix/etc"),
-        ("XDG_CACHE_HOME", "/nix/.cache"),
-        ("XDG_CONFIG_HOME", "/nix/.config"),
-    ];
-
-    let flake_dir = flake_dir.as_ref().canonicalize().unwrap();
-    let build_output = Command::new("nix")
-        .args([
-            "build",
-            &format!("path:{}", flake_dir.display()),
-            "--no-link",
-            "--print-out-paths",
-        ])
-        .envs(env)
-        .stderr(Stdio::inherit())
-        .output()?;
-
-    if !build_output.status.success() {
-        if let Some(exit_code) = build_output.status.code() {
-            bail!("nix build failed with {}", exit_code);
-        } else {
-            bail!("nix build was interrupted by signal");
-        }
-    }
-
-    let base_path = PathBuf::from(
-        build_output
-            .stdout
-            .trim_ascii()
-            .to_string_lossy()
-            .to_string(),
-    );
-    symlink_base(&base_path)?;
-
-    Ok(base_path)
 }
 
 fn user_mount_ns() -> Result<()> {

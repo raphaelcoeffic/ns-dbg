@@ -85,17 +85,17 @@ impl Shell {
         );
         cmd.env("PROMPT", &prompt);
 
-        let nix_base = "/nix/.base";
+        let nix_base = crate::BASE_DIR;
         let data_dir = format!("/usr/local/share:/usr/share:{nix_base}/share");
         cmd.envs([
-            ("ZDOTDIR", "/nix/etc"),
-            ("NIX_CONF_DIR", "/nix/etc"),
+            ("ZDOTDIR", crate::ETC_DIR),
+            ("NIX_CONF_DIR", crate::ETC_DIR),
             (
                 "NIX_SSL_CERT_FILE",
                 "/nix/.base/etc/ssl/certs/ca-bundle.crt",
             ),
-            ("XDG_CACHE_HOME", "/nix/.cache"),
-            ("XDG_CONFIG_HOME", "/nix/.config"),
+            ("XDG_CACHE_HOME", crate::CACHE_HOME),
+            ("XDG_CONFIG_HOME", crate::CONFIG_HOME),
             ("XDG_DATA_DIR", &data_dir),
         ]);
 
@@ -105,7 +105,7 @@ impl Shell {
             ("INFOPATH", format!("{nix_base}/share/info")),
         ]);
 
-        let _ = create_dir_all("/nix/.cache");
+        let _ = create_dir_all(crate::CACHE_HOME);
         cmd.exec()
     }
 
