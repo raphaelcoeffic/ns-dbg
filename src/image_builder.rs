@@ -176,14 +176,19 @@ impl BaseImageBuilder {
     }
 
     fn build_base_in_chroot(&self, tmp: &Path) -> Result<PathBuf> {
+        log::debug!("building base in chroot");
         user_mount_ns()?;
         bind_mount_all_dir(&self.nix_dir, tmp)?;
 
+        log::debug!("chroot to {:?}", tmp);
         let current_dir = std::env::current_dir()?;
         chroot(tmp)?;
-        set_current_dir(current_dir)?;
+
+        log::debug!("set current dir to {:?}", current_dir);
+        set_current_dir(current_dir).unwrap();
 
         // import initial DB
+        log::debug!("import initial DB");
         load_nix_reginfo("/nix/.reginfo")?;
 
         // build_builtins()
@@ -640,11 +645,19 @@ fn user_mount_ns() -> Result<()> {
     let uid = getuid().as_raw();
     let gid = getgid().as_raw();
 
-    unshare(UnshareFlags::NEWNS | UnshareFlags::NEWUSER)
-        .context("could not create new user and mount namespace")?;
+    if uid != 0 {
+        log::debug!("unshare user and mount namespace");
+        unshare(UnshareFlags::NEWNS | UnshareFlags::NEWUSER)
+            .context("could not create new user and mount namespace")?;
 
-    write_id_map("uid_map", uid)?;
-    write_id_map("gid_map", gid)?;
+        log::debug!("write UID/GID map");
+        write_id_map("uid_map", uid)?;
+        write_id_map("gid_map", gid)?;
+    } else {
+        log::debug!("unshare mount namespace");
+        unshare(UnshareFlags::NEWNS)
+            .context("could not create new mount namespace")?;
+    }
 
     return Ok(());
 
@@ -658,6 +671,7 @@ fn user_mount_ns() -> Result<()> {
 }
 
 fn bind_mount_all_dir(base_path: &Path, tmp: &Path) -> Result<()> {
+    log::debug!("bind mount all directories");
     for dir in Path::new("/").read_dir()? {
         let path = dir?.path();
         if path == Path::new("/nix") {
