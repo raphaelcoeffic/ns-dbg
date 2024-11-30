@@ -85,6 +85,7 @@ fn reexec_with_sudo(
     let self_exe = read_link("/proc/self/exe")?;
     let loglevel = std::env::var("LOGLEVEL").unwrap_or_default();
     Err(Command::new("sudo")
+        .arg("_WITH_SUDO=1")
         .args([
             format!("LOGLEVEL={}", loglevel),
             format!("{}={}", ENV_LEAD_PID, lead_pid),
@@ -97,7 +98,7 @@ fn reexec_with_sudo(
 }
 
 fn runs_with_sudo() -> bool {
-    std::env::var("SUDO_UID").is_ok()
+    std::env::var("_WITH_SUDO").is_ok()
 }
 
 fn prepare_shell_environment(
