@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use procfs::process::Process;
 use rustix::{
-    process::{geteuid, waitpid, WaitOptions},
+    process::geteuid,
     runtime::{fork, Fork},
 };
 
@@ -121,13 +121,6 @@ fn prepare_shell_environment(
     Ok(())
 }
 
-fn wait_for_child(child_pid: rustix::thread::Pid) -> Result<()> {
-    // TODO: propagate return code properly
-    let _ = waitpid(Some(child_pid), WaitOptions::empty())
-        .context("waitpid failed")?;
-    Ok(())
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
     init_logging();
@@ -178,13 +171,17 @@ fn main() -> Result<()> {
             let mut shell = Shell::new(&args.container_id);
             shell.env(proc_env);
 
-            // in normal cases, there is no return from exec_shell()
-            if let Err(err) = shell.exec() {
-                log::error!("cannot execute shell: {err}");
-                exit(1);
+            match shell.spawn() {
+                Err(err) => {
+                    log::error!("cannot execute shell: {err}");
+                    exit(1);
+                }
+                Ok(exit_code) => exit(exit_code),
             }
-            exit(0);
         }
-        Fork::Parent(child_pid) => wait_for_child(child_pid),
+        Fork::Parent(child_pid) => {
+            let res = wait_for_child(child_pid)?;
+            exit(res);
+        }
     }
 }

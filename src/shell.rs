@@ -3,12 +3,12 @@ use std::{
     ffi::{OsStr, OsString},
     fs::create_dir_all,
     os::unix::process::CommandExt,
-    process::{self, exit, Command},
+    process::{exit, Command},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use rustix::{
-    process::{waitpid, WaitOptions},
+    process::{getpid, kill_process, waitpid, Signal, WaitOptions},
     runtime::{fork, Fork},
 };
 
@@ -40,7 +40,7 @@ impl Shell {
         self
     }
 
-    pub fn exec(self) -> Result<()> {
+    fn exec(self) -> std::io::Error {
         //
         // TODO: path HOME w/ user as defined by /etc/passwd
         //
@@ -106,28 +106,47 @@ impl Shell {
         ]);
 
         let _ = create_dir_all("/nix/.cache");
-        let err = cmd.exec();
-        bail!("cannot exec: {}", err)
+        cmd.exec()
     }
 
-    pub fn spawn(self) -> Result<()> {
+    pub fn spawn(self) -> Result<i32> {
         match unsafe { fork()? } {
             Fork::Child(_) => {
-                if let Err(err) = self.exec() {
-                    log::error!("cannot execute shell: {err}");
-                    exit(1);
-                }
-                exit(0);
+                let err = self.exec();
+                log::error!("cannot execute shell: {err}");
+                exit(1);
             }
             Fork::Parent(child_pid) => wait_for_child(child_pid),
         }
     }
 }
 
-pub fn wait_for_child(child_pid: rustix::thread::Pid) -> Result<()> {
-    // TODO: propagate return code properly
-    log::debug!("parent pid = {}", process::id());
-    let _ = waitpid(Some(child_pid), WaitOptions::empty())
-        .context("waitpid failed")?;
-    Ok(())
+pub fn wait_for_child(child_pid: rustix::thread::Pid) -> Result<i32> {
+    loop {
+        let maybe_wait_status = waitpid(Some(child_pid), WaitOptions::UNTRACED)
+            .context("waitpid failed")?;
+
+        if let Some(wait_status) = maybe_wait_status {
+            if wait_status.stopped() {
+                log::debug!("receveid SIGSTOP");
+                let _ = kill_process(getpid(), Signal::Stop);
+                let _ = kill_process(child_pid, Signal::Cont);
+                continue;
+            }
+
+            if wait_status.exited() {
+                let exit_status = wait_status.exit_status().unwrap() as i32;
+                log::debug!("exit_status = {}", exit_status);
+                return Ok(exit_status);
+            }
+
+            if wait_status.signaled() {
+                let term_signal = wait_status.terminating_signal().unwrap();
+                log::debug!("term_signal = {}", term_signal);
+            }
+
+            log::debug!("exit 1");
+            return Ok(1);
+        }
+    }
 }
