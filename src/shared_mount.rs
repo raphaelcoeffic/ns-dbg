@@ -64,11 +64,15 @@ impl SharedMountBuilder {
         let userns_uid = get_userns_uid(lead_pid).context(
             "could not get owner UID for the container's user namespace",
         )?;
+        log::debug!("userns_uid = {:?}", userns_uid);
 
         let (base_dir, id_mapping) = if userns_uid != 0 {
             (self.state_dir.join("rootless"), None)
         } else {
-            let base_img_metadata = self.base_img.metadata()?;
+            let base_img_metadata =
+                self.base_img.metadata().with_context(|| {
+                    format!("{:?} does not exist", self.base_img)
+                })?;
             let base_img_uid = base_img_metadata.uid();
 
             let id_mapping = if base_img_uid != 0 {
@@ -83,14 +87,18 @@ impl SharedMountBuilder {
 
             (self.state_dir.join("rootful"), id_mapping)
         };
+        log::debug!("base_dir = {:?}, id_mapping = {:?}", base_dir, id_mapping);
 
         let lock_file = base_dir.join("lock");
-        let mut flock = RwLock::new(File::open(lock_file)?);
-        let _guard = flock.write()?;
+        let mut flock = RwLock::new(
+            File::open(lock_file).context("cannot open lock file")?,
+        );
+        let _guard = flock.write().context("cannot create lock")?;
 
         let pids_dir = base_dir.join("pids");
         let merged_dir = base_dir.join("merged");
 
+        log::debug!("entering shared mount namespace");
         if !enter_shared_mount_namespace(&pids_dir)? {
             // create a private mount namespace for the overlay
             private_mount_namespace()
@@ -255,6 +263,7 @@ fn bind_mount_idmapped(
     Ok(())
 }
 
+#[derive(Debug)]
 struct IdMaps {
     uid_map: IdMap,
     gid_map: IdMap,
@@ -325,7 +334,7 @@ fn clone_new_userns() -> Result<RawPid, std::io::Error> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct IdMap {
     sys_id: u32,
     mapped_id: u32,
