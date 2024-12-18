@@ -210,11 +210,13 @@ impl BaseImageBuilder {
         nixos::load_store_db("/nix/.reginfo")?;
 
         // build base flake
+        let flake_dir = Path::new(crate::CACHE_HOME).join("base-flake");
         let store_path = match &self.flake_dir {
             None => nixos::build_flake_from_package_list(
                 "debug-shell",
                 "A debug shell",
                 crate::BASE_PACKAGES,
+                &flake_dir,
             )?,
             Some(flake_dir) => nixos::build_flake(flake_dir)?,
         };
@@ -226,9 +228,7 @@ impl BaseImageBuilder {
 
     fn do_package(&self) -> Result<()> {
         if self.package_output.is_none() {
-            // no packaging, run garbage collection instead
-            log::info!("running nix garbage collector");
-            return nixos::run_gc();
+            return Ok(());
         }
 
         let output = self.package_output.as_ref().unwrap();

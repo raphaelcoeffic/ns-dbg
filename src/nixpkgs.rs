@@ -285,10 +285,12 @@ pub fn remove_package(name: &str) -> Result<()> {
 
 fn build_user_env_flake(pkgs: &Packages) -> Result<()> {
     let flake_pkgs: Vec<&str> = pkgs.iter().map(|p| p.name.as_ref()).collect();
+    let flake_dir = Path::new(crate::CACHE_HOME).join("env-flake");
     let path = crate::nixos::build_flake_from_package_list(
         "user-env",
         "Dive installed packages",
         &flake_pkgs,
+        &flake_dir,
     )
     .context("failed to build flake")?;
     nixos::symlink_store_path(path, "user-env", crate::USER_ENV_DIR)?;

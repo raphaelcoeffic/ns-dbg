@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
-use tempfile::tempdir;
 
 pub(crate) const ENV_VARS: [(&str, &str); 4] = [
     ("PATH", "/nix/.bin"),
@@ -64,12 +63,10 @@ pub fn build_flake_from_package_list(
     name: &str,
     description: &str,
     packages: &[&str],
+    flake_dir: &Path,
 ) -> Result<PathBuf> {
     let mut packages: Vec<&str> = Vec::from(packages);
     packages.sort();
-
-    let flake_tmp = tempdir()?;
-    let flake_dir = flake_tmp.path();
 
     let flake_template = include_str!("templates/flake.nix");
     let re = Regex::new(r"\{\{\s*(\w+)\s*\}\}").unwrap();
@@ -85,6 +82,7 @@ pub fn build_flake_from_package_list(
     });
 
     log::debug!("writing flake.nix to {}", flake_dir.display());
+    fs::create_dir_all(flake_dir)?;
     fs::write(flake_dir.join("flake.nix"), flake.as_ref())?;
 
     log::debug!("building flake in {}", flake_dir.display());
