@@ -29,15 +29,23 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Build pkg tool
+      uses: houseabsolute/actions-rust-cross@v0
+      with:
+        target: ${{ matrix.platform.target }}
+        args: "--locked --release --bin pkg"
+        strip: true
+
     - name: Build base image
       env:
         ARCH: ${{ matrix.platform.arch }}
+        TARGET: ${{ matrix.platform.target }}
       run: |
         if [ "$ARCH" != "$(uname -m)" ]; then
           sudo apt-get update
           sudo apt-get install qemu-user-static
         fi
-        cargo run --bin build-img -- -a $ARCH
+        cargo run --bin build-img -- -a $ARCH -b target/$TARGET/release/pkg
         cargo clean
 
     - name: Upload artifacts - base image
@@ -46,8 +54,9 @@ jobs:
         name: base-${{ matrix.platform.target }}
         path: |
           base.tar.xz
+          base.sha256
 
-    - name: Build binary
+    - name: Build dive
       uses: houseabsolute/actions-rust-cross@v0
       with:
         target: ${{ matrix.platform.target }}
