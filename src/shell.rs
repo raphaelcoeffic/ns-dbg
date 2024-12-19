@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use itertools::Itertools;
 use rustix::{
     process::{getpid, kill_process, waitpid, Signal, WaitOptions},
     runtime::{fork, Fork},
@@ -20,6 +21,9 @@ pub struct Shell {
 }
 
 impl Shell {
+    const NIX_ENVS: [&str; 2] = [crate::USER_ENV_DIR, crate::BASE_DIR];
+    const BIN_DIRS: [&str; 2] = ["bin", "sbin"];
+
     pub fn new(name: &str) -> Self {
         Shell {
             name: name.to_owned(),
@@ -38,6 +42,17 @@ impl Shell {
                 .insert(key.as_ref().to_owned(), val.as_ref().to_owned());
         }
         self
+    }
+
+    pub fn spawn(self) -> Result<i32> {
+        match unsafe { fork()? } {
+            Fork::Child(_) => {
+                let err = self.exec();
+                log::error!("cannot execute shell: {err}");
+                exit(1);
+            }
+            Fork::Parent(child_pid) => wait_for_child(child_pid),
+        }
     }
 
     fn exec(self) -> std::io::Error {
@@ -64,7 +79,7 @@ impl Shell {
         };
 
         // TODO: these variable except for TERM should be initialized in zshenv
-        let nix_bin_path = "/nix/.base/sbin:/nix/.base/bin:/nix/.bin";
+        let nix_bin_path = Self::get_bin_paths();
         cmd.env("PATH", format!("{nix_bin_path}:{proc_path}"));
 
         if let Ok(term) = std::env::var("TERM") {
@@ -85,39 +100,37 @@ impl Shell {
         );
         cmd.env("PROMPT", &prompt);
 
-        let nix_base = "/nix/.base";
-        let data_dir = format!("/usr/local/share:/usr/share:{nix_base}/share");
+        let share_paths = Self::get_env_paths("share");
+        let data_dir = format!("{share_paths}:/usr/local/share:/usr/share");
         cmd.envs([
-            ("ZDOTDIR", "/nix/etc"),
-            ("NIX_CONF_DIR", "/nix/etc"),
-            (
-                "NIX_SSL_CERT_FILE",
-                "/nix/.base/etc/ssl/certs/ca-bundle.crt",
-            ),
-            ("XDG_CACHE_HOME", "/nix/.cache"),
-            ("XDG_CONFIG_HOME", "/nix/.config"),
+            ("ZDOTDIR", crate::ETC_DIR),
+            ("NIX_CONF_DIR", crate::ETC_DIR),
+            ("NIX_SSL_CERT_FILE", crate::SSL_CERTS),
+            ("XDG_CACHE_HOME", crate::CACHE_HOME),
+            ("XDG_CONFIG_HOME", crate::CONFIG_HOME),
             ("XDG_DATA_DIR", &data_dir),
         ]);
 
         cmd.envs([
-            ("TERMINFO_DIRS", format!("{nix_base}/share/terminfo")),
-            ("LIBEXEC_PATH", format!("{nix_base}/libexec")),
-            ("INFOPATH", format!("{nix_base}/share/info")),
+            ("TERMINFO_DIRS", Self::get_env_paths("share/terminfo")),
+            ("LIBEXEC_PATH", Self::get_env_paths("libexec")),
+            ("INFOPATH", Self::get_env_paths("share/info")),
         ]);
 
-        let _ = create_dir_all("/nix/.cache");
+        let _ = create_dir_all(crate::CACHE_HOME);
         cmd.exec()
     }
 
-    pub fn spawn(self) -> Result<i32> {
-        match unsafe { fork()? } {
-            Fork::Child(_) => {
-                let err = self.exec();
-                log::error!("cannot execute shell: {err}");
-                exit(1);
-            }
-            Fork::Parent(child_pid) => wait_for_child(child_pid),
-        }
+    fn get_bin_paths() -> String {
+        Self::NIX_ENVS
+            .iter()
+            .cartesian_product(Self::BIN_DIRS)
+            .map(|(env, dir)| format!("{env}/{dir}"))
+            .join(":")
+    }
+
+    fn get_env_paths(dir: &str) -> String {
+        Self::NIX_ENVS.map(|e| format!("{e}/{dir}")).join(":")
     }
 }
 

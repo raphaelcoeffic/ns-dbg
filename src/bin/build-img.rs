@@ -16,13 +16,21 @@ struct Args {
     #[arg(short, long, env)]
     persistent_base_dir: Option<PathBuf>,
 
-    /// Persistent base directory
+    /// Alternative flake directory
     #[arg(short, long, env)]
     flake_dir: Option<PathBuf>,
+
+    /// Add binary into base image
+    #[arg(short = 'b', long = "add-binary")]
+    binaries: Vec<PathBuf>,
 
     /// Architecture
     #[arg(short, long, env)]
     arch: Option<String>,
+
+    /// No packaging
+    #[arg(long, env)]
+    unpackaged: bool,
 
     /// Compress base image
     #[arg(short, long, env)]
@@ -102,7 +110,11 @@ fn main() -> Result<()> {
 
     let base_dir = BaseDir::new(args.persistent_base_dir)?;
     let mut base_builder = BaseImageBuilder::new(base_dir.path());
-    base_builder.package(args.output, !args.uncompressed);
+    base_builder.binaries(args.binaries);
+
+    if !args.unpackaged {
+        base_builder.package(args.output, !args.uncompressed);
+    }
 
     if let Some(flake_dir) = args.flake_dir {
         base_builder.flake_dir(flake_dir);

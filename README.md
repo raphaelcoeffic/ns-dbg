@@ -15,6 +15,7 @@ time.
 
 ### Core Features
 - Inject a complete shell environment into running containers
+- Install additional debugging tools with the built-in [package manager](#package-tool)
 - Works with any container, including minimal and distroless images
 - Zero container modifications required
 - No build-time dependencies
@@ -75,6 +76,23 @@ dive my-distroless-app
 dive 7d3f2c1b9e4a
 ```
 
+## Package Tool
+
+Inside a `dive` session, you can add or remove packages:
+```bash
+# Add a package
+pkg install iftop
+
+# Or remove it
+pkg remove iftop
+
+# List installed packages
+pkg list
+
+# Search for packages
+pkg search helix
+```
+
 ## Contributing
 
 Contributions are welcome! Feel free to open issues and pull requests.
@@ -86,7 +104,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Roadmap
 
 ### Short term
-- 🔧 Add package manager for easy installation of additional debugging tools
 - 🗑️ Add a clean-up command to remove local files
 
 ### Coming later
